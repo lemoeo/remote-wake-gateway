@@ -127,9 +127,8 @@ func sendPackets(ctx context.Context, w model.WoL, source net.IP) error {
 		return e
 	}
 	defer conn.Close()
-	if e = enableBroadcast(conn); e != nil {
-		return e
-	}
+	// net.DialUDP enables SO_BROADCAST for IPv4 UDP sockets on our supported
+	// platforms, including Windows. No extra platform-specific setup is needed.
 	for i := 0; i < w.Repeat; i++ {
 		if e = ctx.Err(); e != nil {
 			return e

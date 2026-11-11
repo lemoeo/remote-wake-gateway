@@ -8,13 +8,14 @@
 
 | 范围 | 当前行为 |
 | --- | --- |
-| 程序与部署 | Go 单程序、前端 embed、CLI、systemd 与 Linux Docker 模板 |
+| 程序与部署 | Go 单程序、前端 embed、CLI、systemd、macOS launchd、OpenWrt procd 与 Linux Docker 模板 |
+| Windows | `LockFileEx` 独占锁、显式释放、私有 ACL、同步临时文件及 write-through 替换、标准库 UDP 广播；前台运行与 Web 管理，amd64 / arm64 构建 |
 | 设备管理 | 增删改查、revision 冲突检查、按策略校验、导入预览与原子提交、公开导出 |
 | 设备 ID 与类型 | 新建设备后台自动生成稳定 ID，添加 / 编辑表单和普通卡片隐藏 ID；设备类型选择保留，API / CLI / 导出继续使用 ID，已有 ID 不迁移 |
 | 唤醒策略 | WoL、Mac VNC DH(30)、组合策略、可选 TCP 上线等待 |
 | WoL 网卡选择 | 默认由系统路由选择；手动选择绑定 IPv4 源地址，支持自定义广播和 `255.255.255.255`，子网不匹配仅提示 |
 | 任务 | 有界队列、并发限制、设备与 VNC 目标互斥、幂等键、进度、取消、查询、历史分页 |
-| 持久化 | 同目录临时文件、文件与目录同步、OS 文件锁、规范任务记录、重启中断恢复、保留期和数量上限 |
+| 持久化 | 同目录临时文件、内容同步、Unix 父目录同步 / Windows write-through 替换、OS 文件锁、规范任务记录、重启中断恢复、保留期和数量上限 |
 | 认证保护 | 管理员 bcrypt、首次令牌、内存会话、CSRF、Origin、请求限流、密码哈希并发限制 |
 | VNC 凭据 | AES-256-GCM、目标绑定、只写 API、密钥丢失拒绝替换、发送认证前持久保护记录 |
 | Web | 登录/初始化、设备卡片、三种策略表单、步骤详情、历史、设置、导入导出，无运行时 CDN |
@@ -24,6 +25,8 @@
 ## 验证方式
 
 已通过：`go test -race ./...`、`go vet ./...`、前端 TypeScript 检查、Vite 生产构建与 17 项前端请求 / 网卡配置 / 批量调度与面板状态测试。本机 macOS arm64 可执行文件及 Linux amd64 / arm64 交叉编译产物位于 `bin/`。
+
+Windows 适配已在 macOS 上通过完整 Go 竞态回归，Windows amd64 / arm64 全部测试包编译及对应 `go vet` 检查通过；这些交叉编译检查不执行 Windows 测试。已配置 `windows-latest` 原生 CI，专项测试检查实际 ACL、替换失败时旧文件不变且临时文件清理、Unicode / 空格路径、Socket 广播选项和跨进程互斥 / 强制退出后解锁。当前会话没有 Windows 运行环境，尚未执行该原生 CI；Windows arm64 和真实 LAN 广播也需目标设备验收。Windows 写入采用先同步内容、再替换的流程，不承诺与 Unix 目录同步完全相同的断电保证。
 
 Go 测试包括真实本机 HTTP/TCP/UDP 服务和模拟 Apple DH 服务端。DH 测试由服务端独立计算共享密钥并解密用户名/密码字段，验证正确线格式、安全类型选择和认证后不发送 ClientInit。测试还覆盖认证拒绝、限流、持久化失败不提交密码、错误密码跨新命令及跨重启冷却。
 
@@ -44,7 +47,7 @@ Go 测试包括真实本机 HTTP/TCP/UDP 服务和模拟 Apple DH 服务端。DH
 ## 与完整规划的交付边界
 
 - MQTT、云端、outbox、Android、WebSocket 属于后续阶段，本次没有加入空模块。
-- 当前支持 Linux / macOS 文件锁与 socket 广播，FreeBSD 代码路径尚未实测；其他平台明确拒绝启动，不宣称已支持 Windows。
+- 文件锁实现覆盖 Linux / macOS / FreeBSD / Windows，UDP 广播使用 Go 标准库。macOS 回归已通过；Windows 原生 CI 已配置，尚待远端运行；Linux / FreeBSD 的新增路径与目标设备效果仍需对应环境验证。
 - 使用规范 JSON 任务文件作为历史来源，尚未增加可重建 JSONL 归档。默认 stdout 日志，尚无文件日志轮转器。
 - schema 不兼容时明确拒绝读取；尚无自动版本迁移器。备份和升级目前按 README 手工执行。
 - 任务容量采用数量上限（10000 条，每文件另有 4 MiB 上限），尚无独立的任务目录总字节设置。

@@ -21,3 +21,39 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/gateway-amd64 ./cmd/remotewake-gateway
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/gateway-arm64 ./cmd/remotewake-gateway
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Test on native Windows
+        run: go test ./...
+      - run: go vet ./...
+      - name: Build Windows binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          $env:GOOS = 'windows'
+          $env:CGO_ENABLED = '0'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags='-s -w' -o bin/remotewake-gateway-windows-amd64.exe ./cmd/remotewake-gateway
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./bin/remotewake-gateway-windows-amd64.exe version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:GOARCH = 'arm64'
+          go build -trimpath -ldflags='-s -w' -o bin/remotewake-gateway-windows-arm64.exe ./cmd/remotewake-gateway
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

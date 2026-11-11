@@ -8,13 +8,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 const MaxFile = 4 << 20
 
 type Store struct {
-	Dir  string
-	lock *os.File
+	Dir       string
+	lock      *os.File
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func Open(dir string) (*Store, error) {
@@ -26,6 +29,9 @@ func Open(dir string) (*Store, error) {
 		if err = os.MkdirAll(filepath.Join(abs, sub), 0700); err != nil {
 			return nil, err
 		}
+		if err = protectDirectory(filepath.Join(abs, sub)); err != nil {
+			return nil, fmt.Errorf("无法保护数据目录权限: %w", err)
+		}
 	}
 	f, err := os.OpenFile(filepath.Join(abs, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -35,13 +41,18 @@ func Open(dir string) (*Store, error) {
 		f.Close()
 		return nil, fmt.Errorf("数据目录已被占用或无法锁定: %w", err)
 	}
+	if err = protectFile(f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("无法保护锁文件权限: %w", err)
+	}
 	return &Store{Dir: abs, lock: f}, nil
 }
 func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
-	return s.lock.Close()
+	s.closeOnce.Do(func() { s.closeErr = errors.Join(unlockFile(s.lock), s.lock.Close()) })
+	return s.closeErr
 }
 func (s *Store) Path(name string) string { return filepath.Join(s.Dir, name) }
 func Decode(data []byte, v any) error {
@@ -84,7 +95,8 @@ func (s *Store) Write(name string, v any) error {
 	return s.WriteBytes(name, append(b, '\n'))
 }
 
-// A successful return means both the replacement and directory metadata are synced.
+// Contents are flushed before publishing a replacement. Platform-specific
+// publication handles directory sync on Unix and write-through moves on Windows.
 func (s *Store) WriteBytes(name string, b []byte) error {
 	dest := s.Path(name)
 	dir := filepath.Dir(dest)
@@ -94,7 +106,7 @@ func (s *Store) WriteBytes(name string, b []byte) error {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	if err = f.Chmod(0600); err != nil {
+	if err = protectFile(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -109,13 +121,5 @@ func (s *Store) WriteBytes(name string, b []byte) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(tmp, dest); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return replaceFile(tmp, dest)
 }

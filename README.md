@@ -200,6 +200,60 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.lemoeo.remotewake-gat
 
 重启即依次执行 `bootout` 和 `bootstrap`，让应用收到终止信号并完成退出。仅执行 `bootout` 不取消下次开机加载；要长期停用，还需执行 `sudo launchctl disable system/com.lemoeo.remotewake-gateway`，恢复时先 `enable` 再 `bootstrap`。模板会在非零退出后尝试重新启动，并为停止操作预留 15 秒。
 
+## Windows
+
+支持 Windows amd64 / arm64 命令行启动和 Web 管理。数据目录应放在当前账户可写的本地 NTFS 文件系统，建议使用 `%LOCALAPPDATA%\RemoteWakeGateway\data`。程序会收紧数据目录和新写入文件的 ACL，仅允许运行账户、SYSTEM 和本机 Administrators 访问；不支持缺少这些权限控制的 FAT / exFAT 数据盘，不将网络共享作为已验证的数据存储。
+
+### 构建和启动
+
+从源码构建时，先按“从源码构建”准备 Go、Node.js 和前端资源。在项目根目录的 PowerShell 执行：
+
+```powershell
+npm --prefix web ci --no-audit --no-fund
+npm --prefix web run build
+New-Item -ItemType Directory -Force bin | Out-Null
+$env:CGO_ENABLED = '0'
+go build -trimpath -ldflags='-s -w' -o bin/remotewake-gateway.exe ./cmd/remotewake-gateway
+```
+
+若从其他系统交叉编译，设置 `GOOS=windows`，并按目标 CPU 设置 `GOARCH=amd64` 或 `arm64`；`scripts/build.sh` 在 Windows 目标下自动输出 `.exe` 后缀。
+
+在 PowerShell 运行程序，或将下载的对应架构二进制重命名为下列程序路径：
+
+```powershell
+$RWG_DATA = Join-Path $env:LOCALAPPDATA 'RemoteWakeGateway\data'
+& .\bin\remotewake-gateway.exe serve --data-dir $RWG_DATA
+```
+
+程序在当前终端前台运行，使用 `Ctrl+C` 停止。另开一个终端，从同一项目目录读取首次初始化令牌：
+
+```powershell
+$RWG_DATA = Join-Path $env:LOCALAPPDATA 'RemoteWakeGateway\data'
+& .\bin\remotewake-gateway.exe token --data-dir $RWG_DATA
+```
+
+访问 [http://127.0.0.1:9000](http://127.0.0.1:9000)，输入令牌并设置管理员密码。以后继续使用相同数据目录和运行账户启动，不必重新初始化。默认无需管理员权限运行。需要 LAN / 蒲公英访问时，修改应用监听地址并重启，只允许可信 LAN / VPN 来源通过 Windows 防火墙访问该端口。
+
+### 停止、升级和密码恢复
+
+停止服务并确认进程已退出后，再替换 `.exe` 或备份整个数据目录；备份须包含 `secrets` 中的密文及密钥和 `jobs` 中的任务记录。恢复后仍使用原账户运行，并保留原目录的私有权限。`.lock` 文件可以长期保留，不要手工删除；进程强制退出后系统会释放锁，遗留任务按现有规则恢复为结果不明，不自动重复执行。
+
+忘记密码时先停止程序，然后在 PowerShell 使用安全输入通过标准输入执行本机恢复命令：
+
+```powershell
+$RWG_DATA = Join-Path $env:LOCALAPPDATA 'RemoteWakeGateway\data'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$RWG_PASSWORD = Read-Host '新管理员密码（6–72 UTF-8 字节）' -AsSecureString
+[System.Net.NetworkCredential]::new('', $RWG_PASSWORD).Password | & .\bin\remotewake-gateway.exe reset-password --data-dir $RWG_DATA --password-stdin
+Remove-Variable RWG_PASSWORD
+```
+
+完成后重新启动程序。该命令仅更新管理员密码，不删除设备、VNC 凭据或任务记录。
+
+Windows 数据写入采用同目录临时文件，先设置私有 ACL，再写入并同步内容，随后使用 `MoveFileExW` 的替换与 write-through 标志发布；不会先删除旧文件，也不会在替换失败时回退为覆盖写入。它与 Unix 的父目录同步实现不同，不能将本机测试等同于断电持久性保证；文件被外部程序以禁止替换的方式占用时，保存会明确失败，应关闭占用后按错误提示处理。
+
+Windows CI 会原生运行测试（包括文件锁、强制退出、ACL、文件替换及本机回环 UDP），并构建 amd64 / arm64 程序。arm64 构建和目标局域网广播效果仍需相应设备验证。当前提供前台运行方式，未注册 Windows 系统服务。
+
 ## OpenWrt（procd）
 
 提供 [procd 服务脚本](deployments/openwrt/remotewake-gateway.init) 和 [UCI 配置](deployments/openwrt/remotewake-gateway.config)，适用于使用 procd 的 OpenWrt；无需 Node.js 或 Docker。脚本使用 [OpenWrt 官方 procd 接口](https://openwrt.org/docs/guide-developer/procd-init-scripts)管理前台进程、重启及系统日志。当前未提供 ipk / apk 安装包或 LuCI 页面。
@@ -293,6 +347,6 @@ OpenWrt 的实际开机自启、procd 重启和 LAN 广播效果仍需在目标�
 
 ## 后续开发
 
-MQTT 云端中转、持久 outbox、云端用户与 Gateway 绑定、Windows 文件锁及自动服务安装器尚未实现。已提供 macOS launchd、OpenWrt procd 与 Linux systemd 服务模板，需按对应章节手动安装。现有业务层不依赖 HTTP，可在后续接入 MQTT 命令适配器。
+MQTT 云端中转、持久 outbox、云端用户与 Gateway 绑定及自动服务安装器尚未实现。Windows 已补充文件锁、数据写入与 ACL 适配。已提供 macOS launchd、OpenWrt procd 与 Linux systemd 服务模板，需按对应章节手动安装。现有业务层不依赖 HTTP，可在后续接入 MQTT 命令适配器。
 
 ![设备管理预览（临时示例设备）](docs/screenshots/gateway-preview.png)

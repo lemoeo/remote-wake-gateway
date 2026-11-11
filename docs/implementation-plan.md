@@ -183,7 +183,7 @@ data/
 ### 5.1 写入和恢复
 
 - 一个数据目录仅一个写进程；启动获取 OS 文件锁。不能使用“文件存在即占锁”的方式，也不能靠删除锁文件恢复。
-- JSON 使用同目录临时文件 → Sync → Close → 原子替换；支持的平台还需同步父目录。失败不发布新的内存状态。Windows 的替换与断电保证单独适配并验证。
+- JSON 使用同目录临时文件 → Sync → Close → 替换；Unix 同步父目录。Windows 使用 `MoveFileExW` 的 `REPLACE_EXISTING | WRITE_THROUGH` 标志发布，不先删除旧文件或回退为覆盖写入；ACL 在写入临时文件内容前设置。失败不发布新的内存状态。Windows 替换与 Unix 父目录同步的持久性边界不同，断电行为需目标设备专项验证。
 - 持久化操作有大小上限和 schema 校验；迁移前备份，遇到未知更高版本或损坏文件明确停止相关功能，不覆盖为空配置。
 - `jobs/{job_id}.json` 是任务及幂等的规范记录；启动扫描重建 command_id 索引。接受前持久化 `pending`，外部网络操作前持久化 `running`，终态落盘后才报告已持久完成。
 - command_id 查重、容量预留、设备互斥和任务落盘在调度临界区统一处理。落盘失败则不接受、不执行；终态写入失败保留原任务并锁住该设备，报告存储错误，避免再次认证。
@@ -203,7 +203,7 @@ data/
 - 修改 IP、端口、用户名必须同时提供新密码或明确清除，不能把旧密码静默转发给新目标。删除设备先保存删除结果，再移除孤立凭据；启动清理无设备引用的凭据。
 - API 不回传密码、密文或密钥，只返回 `password_configured`；前端密码框不回填。省略密码表示保留，显式清除和设置新值互斥。
 - 密钥缺失而密文存在时禁止自动生成替代密钥覆盖；提示恢复密钥或明确清除后重配。
-- Unix 数据目录 0700、秘密文件 0600；Windows 单独验证服务账户 ACL。密钥与密文同机不能抵御整机或整个数据目录泄露。
+- Unix 数据目录 0700、秘密文件 0600；Windows 数据目录及新写入文件采用私有 ACL，仅允许运行账户、SYSTEM 和本机 Administrators。密钥与密文同机不能抵御整机或整个数据目录泄露。
 - 凭据仅执行时解密，尽量缩短存活并清理可控缓冲区；不声称 Go 内存中的所有副本都能可靠擦除。
 - 导出默认仅含公开设备配置；完整离线备份需停服务，妥善保护密文与对应密钥。导入不携带旧密码，先预览和验证再提交。
 
@@ -367,7 +367,7 @@ Linux 使用 systemd、非 root 专用账户、持久数据目录；普通 UDP �
 
 NAS Docker 优先 Linux `network_mode: host`，挂载 `/data`、自动重启，并用 UID/GID 保证秘密目录权限；不使用 privileged。host 模式共享 Linux 宿主机网络且端口映射不生效；Docker Desktop 存在不同限制，不能用桌面容器测试替代 NAS 广播验收。[Docker host 网络说明](https://docs.docker.com/engine/network/drivers/host/)
 
-先发布 Linux amd64、arm64，按设备需求增加 armv7。OpenWrt 后续按实际 CPU、内核、Go 运行要求、存储和 procd 验证，再决定 MIPS softfloat 等产物。厂商品牌、编译成功均不等于固件可运行；“可运行程序的路由器”需逐机型确认。macOS、Windows 可做开发及后续原生运行适配，首版不承诺其服务安装器。
+构建覆盖 Linux amd64 / arm64、macOS 及 Windows amd64 / arm64；Windows 支持前台命令行运行和 Web 管理，并配置原生 Windows CI。按设备需求增加 armv7；OpenWrt 按实际 CPU、内核、Go 运行要求、存储和 procd 验证，再决定 MIPS softfloat 等产物。厂商品牌、编译成功均不等于固件可运行；“可运行程序的路由器”需逐机型确认。macOS 使用 launchd 模板；Windows 系统服务安装器另行实现。
 
 提供 `serve`、`init`、`check`、`interfaces`、`wake --device` 和 `version`。升级替换程序前检查 schema 并备份数据；降级如涉及 schema 变化必须恢复对应备份。首版提供人工升级流程及 SHA256 校验，不自动修改防火墙或后台升级。
 

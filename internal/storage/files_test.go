@@ -2,6 +2,7 @@ package storage
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestLockAndFailedReplacementPreserveData(t *testing.T) {
 		t.Fatalf("old data lost: %v", e)
 	}
 	info, _ := os.Stat(s.Path("config.json"))
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatal("unsafe permissions")
 	}
 	s.Close()
