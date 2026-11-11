@@ -1,0 +1,26 @@
+[Unit]
+Description=RemoteWake Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remotewake
+Group=remotewake
+StateDirectory=remotewake-gateway
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/remotewake-gateway
+ExecStart=/usr/local/bin/remotewake-gateway serve --data-dir /var/lib/remotewake-gateway
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
