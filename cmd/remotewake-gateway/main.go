@@ -49,7 +49,7 @@ func run(args []string) error {
 	listen := flags.String("listen", "", "HTTP 监听地址（仅本次生效）")
 	device := flags.String("device", "", "设备 ID")
 	stdin := flags.Bool("password-stdin", false, "从标准输入读取管理密码")
-	apiURL := flags.String("url", "http://127.0.0.1:8080", "正在运行的 Gateway URL")
+	apiURL := flags.String("url", "http://127.0.0.1:9000", "正在运行的 Gateway URL")
 	if e := flags.Parse(args); e != nil {
 		return e
 	}
@@ -69,7 +69,7 @@ func run(args []string) error {
 		return nil
 	case "wake":
 		if !*stdin || !model.ValidID(*device) {
-			return errors.New("用法: wake --device ID --password-stdin [--url http://127.0.0.1:8080]")
+			return errors.New("用法: wake --device ID --password-stdin [--url http://127.0.0.1:9000]")
 		}
 		password, e := readPassword()
 		if e != nil {

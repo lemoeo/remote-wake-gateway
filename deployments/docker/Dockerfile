@@ -18,6 +18,6 @@ RUN addgroup -S -g 10001 remotewake && adduser -S -D -H -u 10001 -G remotewake r
 COPY --from=build /gateway /usr/local/bin/remotewake-gateway
 USER 10001:10001
 WORKDIR /data
-EXPOSE 8080
+EXPOSE 9000
 ENTRYPOINT ["remotewake-gateway"]
-CMD ["serve", "--data-dir", "/data", "--listen", "0.0.0.0:8080"]
+CMD ["serve", "--data-dir", "/data", "--listen", "0.0.0.0:9000"]

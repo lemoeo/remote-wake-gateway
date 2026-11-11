@@ -60,7 +60,7 @@ func (c *Config) Defaults() {
 }
 
 func DefaultConfig() Config {
-	return Config{SchemaVersion: Schema, GatewayID: ID("gw_"), Name: "Home Gateway", Listen: "127.0.0.1:8080", AllowedNetworks: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}, MaxConcurrent: 4, MaxVNC: 2, QueueSize: 16, RetentionDays: 7, MaxJobs: 10000, DeviceDefaults: DefaultDeviceDefaults()}
+	return Config{SchemaVersion: Schema, GatewayID: ID("gw_"), Name: "Home Gateway", Listen: "127.0.0.1:9000", AllowedNetworks: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}, MaxConcurrent: 4, MaxVNC: 2, QueueSize: 16, RetentionDays: 7, MaxJobs: 10000, DeviceDefaults: DefaultDeviceDefaults()}
 }
 func (c Config) Validate() error {
 	c.Defaults()

@@ -80,16 +80,19 @@ func TestAuthenticatedDeviceAndJobFlow(t *testing.T) {
 	if status, _ := call("GET", "/devices", nil, nil); status != 401 {
 		t.Fatal("devices exposed without auth")
 	}
-	if status, _ := call("POST", "/auth/setup", map[string]string{"token": a.Token(), "password": "test-admin-password"}, map[string]string{"Origin": "https://attacker.example"}); status != 403 {
+	if status, _ := call("POST", "/auth/setup", map[string]string{"token": a.Token(), "password": "test12"}, map[string]string{"Origin": "https://attacker.example"}); status != 403 {
 		t.Fatal("cross-origin setup accepted")
 	}
-	if status, b := call("POST", "/auth/setup", map[string]string{"token": a.Token(), "password": "test-admin-password"}, nil); status != 201 {
+	if status, _ := call("POST", "/auth/setup", map[string]string{"token": a.Token(), "password": "short"}, nil); status != 422 {
+		t.Fatal("setup accepted a five-byte password")
+	}
+	if status, b := call("POST", "/auth/setup", map[string]string{"token": a.Token(), "password": "test12"}, nil); status != 201 {
 		t.Fatalf("setup: %d %s", status, b)
 	}
 	if status, _ := call("POST", "/auth/setup", map[string]string{}, nil); status != 409 {
 		t.Fatal("setup still open")
 	}
-	status, b := call("POST", "/auth/session", map[string]string{"password": "test-admin-password"}, nil)
+	status, b := call("POST", "/auth/session", map[string]string{"password": "test12"}, nil)
 	if status != 200 {
 		t.Fatalf("login: %s", b)
 	}

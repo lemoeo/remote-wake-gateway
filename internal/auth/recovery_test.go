@@ -5,6 +5,7 @@ import (
 	"github.com/lemoeo/remote-wake-gateway/internal/storage"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -35,14 +36,16 @@ func TestLocalPasswordRecoveryPreservesDataAndInvalidatesOldLogin(t *testing.T) 
 		before[name] = b
 	}
 	oldAdmin, _ := os.ReadFile(fs.Path("secrets/admin.json"))
-	if e = ResetPassword(fs, "short"); e == nil {
-		t.Fatal("short password accepted")
+	for _, invalid := range []string{"", "short", strings.Repeat("x", 73)} {
+		if e = ResetPassword(fs, invalid); e == nil {
+			t.Fatal("invalid password accepted")
+		}
 	}
 	unchanged, _ := os.ReadFile(fs.Path("secrets/admin.json"))
 	if !bytes.Equal(oldAdmin, unchanged) {
 		t.Fatal("failed reset changed admin data")
 	}
-	if e = ResetPassword(fs, "new-admin-password"); e != nil {
+	if e = ResetPassword(fs, "new123"); e != nil {
 		t.Fatal(e)
 	}
 	reopened, e := New(fs)
@@ -52,7 +55,7 @@ func TestLocalPasswordRecoveryPreservesDataAndInvalidatesOldLogin(t *testing.T) 
 	if _, _, e = reopened.Login("old-admin-password"); e == nil {
 		t.Fatal("old password remains valid")
 	}
-	if _, _, e = reopened.Login("new-admin-password"); e != nil {
+	if _, _, e = reopened.Login("new123"); e != nil {
 		t.Fatal(e)
 	}
 	req, _ := http.NewRequest("GET", "http://localhost/", nil)
@@ -73,7 +76,7 @@ func TestRecoveryRequiresAnInitializedAdministrator(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer fs.Close()
-	if e = ResetPassword(fs, "new-admin-password"); e == nil {
+	if e = ResetPassword(fs, "new123"); e == nil {
 		t.Fatal("recovery initialized a missing admin")
 	}
 	if _, e = os.Stat(fs.Path("secrets/admin.json")); !os.IsNotExist(e) {

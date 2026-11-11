@@ -43,6 +43,10 @@ func TestWoLDestinationValidation(t *testing.T) {
 
 func TestLegacyConfigurationAndDefaultParameterValidation(t *testing.T) {
 	cfg := DefaultConfig()
+	if cfg.Listen != "127.0.0.1:9000" {
+		t.Fatalf("unexpected default listener: %s", cfg.Listen)
+	}
+	cfg.Listen = "127.0.0.1:8080" // Existing explicit ports remain valid.
 	raw, e := json.Marshal(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -58,6 +62,9 @@ func TestLegacyConfigurationAndDefaultParameterValidation(t *testing.T) {
 		t.Fatal(e)
 	}
 	legacy.Defaults()
+	if legacy.Listen != cfg.Listen {
+		t.Fatal("normalizing defaults changed an existing listener")
+	}
 	if legacy.DeviceDefaults != DefaultDeviceDefaults() {
 		t.Fatal("legacy defaults not normalized")
 	}

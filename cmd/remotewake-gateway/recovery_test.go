@@ -30,7 +30,7 @@ func TestRecoveryCommandRequiresStoppedService(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer input.Close()
-	input.WriteString("new-admin-password\n")
+	input.WriteString("new123\n")
 	input.Seek(0, 0)
 	original := os.Stdin
 	os.Stdin = input
@@ -47,7 +47,7 @@ func TestRecoveryCommandRequiresStoppedService(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, _, e = a.Login("new-admin-password"); e != nil {
+	if _, _, e = a.Login("new123"); e != nil {
 		t.Fatal("CLI did not persist new password")
 	}
 }

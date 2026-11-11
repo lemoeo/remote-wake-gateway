@@ -93,8 +93,8 @@ func (a *Auth) Setup(token, password string) error {
 	if subtle.ConstantTimeCompare(expected[:], provided[:]) != 1 {
 		return model.Error(403, "invalid_setup_token", "初始化令牌无效")
 	}
-	if len(password) < 12 || len(password) > 72 {
-		return model.Error(422, "invalid_password", "管理密码须为 12–72 字节")
+	if len(password) < 6 || len(password) > 72 {
+		return model.Error(422, "invalid_password", "管理密码须为 6–72 字节")
 	}
 	select {
 	case a.hashSlots <- struct{}{}:
@@ -186,8 +186,8 @@ func VerifyCSRF(s Session, value string) bool {
 // exclusive data-directory lock as the server before calling it. No HTTP route
 // exposes this function, and device data, VNC credentials and jobs are untouched.
 func ResetPassword(fs *storage.Store, password string) error {
-	if len(password) < 12 || len(password) > 72 {
-		return model.Error(422, "invalid_password", "管理密码须为 12–72 字节")
+	if len(password) < 6 || len(password) > 72 {
+		return model.Error(422, "invalid_password", "管理密码须为 6–72 字节")
 	}
 	var current admin
 	if e := fs.Read("secrets/admin.json", &current); e != nil {

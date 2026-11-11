@@ -12,13 +12,15 @@
 ./bin/remotewake-gateway serve --data-dir ./data
 ```
 
-默认访问 [http://127.0.0.1:8080](http://127.0.0.1:8080)。首次启动后，在另一个终端读取初始化令牌：
+默认访问 [http://127.0.0.1:9000](http://127.0.0.1:9000)。首次启动后，在另一个终端读取初始化令牌：
 
 ```sh
 ./bin/remotewake-gateway token --data-dir ./data
 ```
 
-在页面输入令牌并设置 12–72 字节的管理员密码。令牌仅用于首次初始化；管理员设置完成后初始化接口关闭。不要公开令牌或整个数据目录。
+在页面输入令牌并设置 6–72 字节的管理员密码。令牌仅用于首次初始化；管理员设置完成后初始化接口关闭。不要公开令牌或整个数据目录。
+
+已有数据目录继续使用 `config.json` 中保存的监听地址，不自动切换端口；如需改为 `9000`，在系统设置中修改监听地址并重启服务。已有管理员密码仍可使用，无需重置。
 
 也可在服务启动前通过标准输入初始化（避免把密码写入命令历史）：
 
@@ -34,7 +36,7 @@
 显式选择可供 LAN / VPN 访问的监听地址：
 
 ```sh
-./bin/remotewake-gateway serve --data-dir ./data --listen 0.0.0.0:8080
+./bin/remotewake-gateway serve --data-dir ./data --listen 0.0.0.0:9000
 ```
 
 通过 Gateway 的局域网或蒲公英可达地址访问。`--listen` 只覆盖本次运行；页面保存的监听地址需重启生效。使用防火墙限制来源，不将管理端口映射到公网。设置 Mac 真实密码优先使用本机或 HTTPS 反向代理；使用反代时设置 `public_url`，应用不信任任意转发头。
@@ -82,13 +84,13 @@ Mac 需开启屏幕共享、授权目标账户并满足网络唤醒条件。VNC 
 ./bin/remotewake-gateway reset-password --data-dir ./data --password-stdin
 ```
 
-通过标准输入提供 12–72 字节的新管理员密码（读取到 EOF），推荐从密码管理器安全管道传入。恢复命令获取与服务相同的数据目录锁，服务运行时拒绝操作；只更新管理员密码，不删除设备、VNC 密文及密钥或历史。完成后按原方式启动服务并用新密码登录。该能力仅供本机 CLI 使用，没有远程免登录重置接口；`init` 仍只负责首次初始化。
+通过标准输入提供 6–72 字节的新管理员密码（读取到 EOF），推荐从密码管理器安全管道传入。恢复命令获取与服务相同的数据目录锁，服务运行时拒绝操作；只更新管理员密码，不删除设备、VNC 密文及密钥或历史。完成后按原方式启动服务并用新密码登录。该能力仅供本机 CLI 使用，没有远程免登录重置接口；`init` 仍只负责首次初始化。
 
 ```sh
 ./bin/remotewake-gateway version
 ./bin/remotewake-gateway interfaces
 ./bin/remotewake-gateway check --data-dir ./data
-./bin/remotewake-gateway wake --device mac-mini --url http://127.0.0.1:8080 --password-stdin
+./bin/remotewake-gateway wake --device mac-mini --url http://127.0.0.1:9000 --password-stdin
 ```
 
 `wake` 从标准输入读取管理员密码，登录正在运行的 Gateway 后创建任务，不绕过任务保护直接读取 Mac 凭据；输出任务 ID，详情可在 Web 中查询。`check` 只读校验配置与设备，不替代运行时网络或凭据验证。
@@ -103,7 +105,7 @@ sh scripts/build.sh
 
 脚本先构建 Vue 前端，再将静态资源嵌入 Go 二进制。仓库也保留当前构建产物，若只修改后端可运行 `RWG_SKIP_WEB=1 sh scripts/build.sh`。
 
-开发时可分别运行后端和 Vite；Vite 默认将 API 代理到 `127.0.0.1:8080`：
+开发时可分别运行后端和 Vite；Vite 默认将 API 代理到 `127.0.0.1:9000`：
 
 ```sh
 go run ./cmd/remotewake-gateway serve --data-dir ./data
@@ -137,7 +139,7 @@ docker compose -f deployments/docker/compose.yaml up -d --build
 docker compose -f deployments/docker/compose.yaml exec gateway remotewake-gateway token --data-dir /data
 ```
 
-容器默认监听 `0.0.0.0:8080`，应限制宿主机防火墙；host 网络不使用端口映射。目标 NAS 必须支持 Linux host 网络。Docker Desktop 的网络行为不能替代 NAS 广播验收。
+容器默认监听 `0.0.0.0:9000`，应限制宿主机防火墙；host 网络不使用端口映射。目标 NAS 必须支持 Linux host 网络。Docker Desktop 的网络行为不能替代 NAS 广播验收。
 
 ## macOS（launchd）
 
@@ -164,9 +166,9 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.lemoeo.remotewake-gat
 /usr/local/bin/remotewake-gateway token --data-dir /usr/local/var/lib/remotewake-gateway
 ```
 
-最后一条命令在服务首次启动生成令牌后执行；如果暂未生成，先检查服务状态和日志。访问 [http://127.0.0.1:8080](http://127.0.0.1:8080)，输入令牌并设置管理员密码。命令行初始化也须使用同一运行账户和数据目录，并先停止服务。
+最后一条命令在服务首次启动生成令牌后执行；如果暂未生成，先检查服务状态和日志。访问 [http://127.0.0.1:9000](http://127.0.0.1:9000)，输入令牌并设置管理员密码。命令行初始化也须使用同一运行账户和数据目录，并先停止服务。
 
-需要 LAN / 蒲公英访问时，在系统设置中将监听地址改为实际可达地址或 `0.0.0.0:8080`，保存后按下面步骤重启。只允许可信 LAN / VPN 来源访问管理端口。Mac 休眠时服务无法持续处理请求，应按网关的使用需求配置睡眠设置。
+需要 LAN / 蒲公英访问时，在系统设置中将监听地址改为实际可达地址或 `0.0.0.0:9000`，保存后按下面步骤重启。只允许可信 LAN / VPN 来源访问管理端口。Mac 休眠时服务无法持续处理请求，应按网关的使用需求配置睡眠设置。
 
 ### 管理、升级与备份
 
@@ -249,21 +251,21 @@ chmod 600 /etc/config/remotewake-gateway
 
 模板默认数据目录 `/etc/remotewake-gateway` 位于持久化存储，UCI 文件位于 `/etc/config/remotewake-gateway`。不要将数据放到重启后清空的 `/tmp` 或 `/var`；设备较多或历史写入量较大时，可在首次启动前将 `main.data_dir` 改为已挂载的持久化存储绝对路径，并保证开机启动时该存储已可用。更改路径不会搬迁已有数据，迁移时需先停服并完整复制原目录。
 
-首次默认仅监听路由器的 `127.0.0.1:8080`。在电脑另开终端建立 SSH 转发并保持连接：
+首次默认仅监听路由器的 `127.0.0.1:9000`。在电脑另开终端建立 SSH 转发并保持连接：
 
 ```sh
-ssh -N -L 18080:127.0.0.1:8080 root@192.168.1.1
+ssh -N -L 19000:127.0.0.1:9000 root@192.168.1.1
 ```
 
-访问电脑上的 [http://127.0.0.1:18080](http://127.0.0.1:18080)，输入前面读取的令牌完成初始化。需要 LAN / 蒲公英直接访问时，可在 Web 系统设置中修改监听地址并重启服务；或在路由器设置 UCI 覆盖值：
+访问电脑上的 [http://127.0.0.1:19000](http://127.0.0.1:19000)，输入前面读取的令牌完成初始化。需要 LAN / 蒲公英直接访问时，可在 Web 系统设置中修改监听地址并重启服务；或在路由器设置 UCI 覆盖值：
 
 ```sh
-uci set remotewake-gateway.main.listen='0.0.0.0:8080'
+uci set remotewake-gateway.main.listen='0.0.0.0:9000'
 uci commit remotewake-gateway
 /etc/init.d/remotewake-gateway restart
 ```
 
-UCI 的非空 `main.listen` 每次启动都会覆盖应用 `config.json` 和 Web 中保存的监听地址。要恢复使用应用配置，将其设为空字符串并重启。防火墙仅允许可信 LAN / VPN 来源访问 TCP 8080，不添加 WAN 放行或公网端口转发；脚本不会自动修改网络或防火墙规则。
+UCI 的非空 `main.listen` 每次启动都会覆盖应用 `config.json` 和 Web 中保存的监听地址。要恢复使用应用配置，将其设为空字符串并重启。防火墙仅允许可信 LAN / VPN 来源访问 TCP 9000，不添加 WAN 放行或公网端口转发；脚本不会自动修改网络或防火墙规则。
 
 ### 管理、升级与备份
 

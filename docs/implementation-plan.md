@@ -283,7 +283,7 @@ type WakeService interface {
 
 安全默认：
 
-- 新安装默认监听 `127.0.0.1:8080`；部署到无界面主机时，由管理员显式绑定 LAN / VPN 地址，配置防火墙来源限制。
+- 新安装默认监听 `127.0.0.1:9000`；部署到无界面主机时，由管理员显式绑定 LAN / VPN 地址，配置防火墙来源限制。
 - 首次初始化使用本机 CLI 可读的一次性令牌，不通过未认证 HTTP 返回。无默认管理密码；初始化完成关闭 setup。
 - 浏览器使用 HttpOnly、SameSite 会话 Cookie；HTTPS 时启用 Secure。写操作校验 CSRF 和 Origin；不在 localStorage 保存管理凭证或 VNC 密码。
 - 管理会话默认 12 小时到期；进程重启后重新登录。CLI 的 `wake --device` 调用正在运行的本机 API，不另开直接读秘密文件的唤醒通道。
