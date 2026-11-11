@@ -10,4 +10,9 @@ output=bin/remotewake-gateway
 if [ "$target_os" = windows ]; then
   output="$output.exe"
 fi
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$output" ./cmd/remotewake-gateway
+build_flags='-s -w'
+if [ -n "${RWG_VERSION:-}" ]; then
+  build_version=$(sh scripts/release.sh --check-version "v${RWG_VERSION#v}")
+  build_flags="$build_flags -X main.version=$build_version"
+fi
+CGO_ENABLED=0 go build -trimpath -ldflags="$build_flags" -o "$output" ./cmd/remotewake-gateway

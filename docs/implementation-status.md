@@ -10,6 +10,7 @@
 | --- | --- |
 | 程序与部署 | Go 单程序、前端 embed、CLI、systemd、macOS launchd、OpenWrt procd 与 Linux Docker 模板 |
 | Windows | `LockFileEx` 独占锁、显式释放、私有 ACL、同步临时文件及 write-through 替换、标准库 UDP 广播；前台运行与 Web 管理，amd64 / arm64 构建 |
+| 发布 | `v*` 标签触发 Actions，Linux / macOS / Windows 原生测试，通过后上传 9 个平台包与 SHA256SUMS；版本注入、预发布识别及包内容 / 架构 / 校验验证 |
 | 设备管理 | 增删改查、revision 冲突检查、按策略校验、导入预览与原子提交、公开导出 |
 | 设备 ID 与类型 | 新建设备后台自动生成稳定 ID，添加 / 编辑表单和普通卡片隐藏 ID；设备类型选择保留，API / CLI / 导出继续使用 ID，已有 ID 不迁移 |
 | 唤醒策略 | WoL、Mac VNC DH(30)、组合策略、可选 TCP 上线等待 |
@@ -25,6 +26,8 @@
 ## 验证方式
 
 已通过：`go test -race ./...`、`go vet ./...`、前端 TypeScript 检查、Vite 生产构建与 17 项前端请求 / 网卡配置 / 批量调度与面板状态测试。本机 macOS arm64 可执行文件及 Linux amd64 / arm64 交叉编译产物位于 `bin/`。
+
+发布流程已通过 actionlint、Shell 语法检查和 21 项版本 / 目标参数测试；本机实际构建全部 9 个平台包，验证压缩包清单、SHA256、ELF / Mach-O / PE 架构、版本字符串、MIPS softfloat / ARMv7 设置及本机程序版本输出。另验证输出目录存在时拒绝覆盖、篡改校验值会被检出，以及 `scripts/build.sh` 的版本注入和 Windows `.exe` 输出。测试产物使用 `v0.0.0-test.*` 名称，仅写入本地 `dist/releases/`；未创建版本标签或 GitHub Release，远端发布及原生跨平台任务需推送代码和标签后验证。
 
 Windows 适配已在 macOS 上通过完整 Go 竞态回归，Windows amd64 / arm64 全部测试包编译及对应 `go vet` 检查通过；这些交叉编译检查不执行 Windows 测试。已配置 `windows-latest` 原生 CI，专项测试检查实际 ACL、替换失败时旧文件不变且临时文件清理、Unicode / 空格路径、Socket 广播选项和跨进程互斥 / 强制退出后解锁。当前会话没有 Windows 运行环境，尚未执行该原生 CI；Windows arm64 和真实 LAN 广播也需目标设备验收。Windows 写入采用先同步内容、再替换的流程，不承诺与 Unix 目录同步完全相同的断电保证。
 

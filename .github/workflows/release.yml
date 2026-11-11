@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sh scripts/release.sh --check-version "$RELEASE_TAG"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Test release version validation
+        run: node --test scripts/release.test.mjs
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-web
+          path: internal/web/dist/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  test:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove previously tracked web output
+        run: rm -rf internal/web/dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-web
+          path: internal/web/dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Test on native operating system
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            go test -timeout 120s ./...
+          else
+            go test -race -timeout 120s ./...
+          fi
+      - run: go vet ./...
+      - name: Verify native executable version
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          version=${RELEASE_TAG#v}
+          binary=./.release-version-smoke
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$version" -o "$binary" ./cmd/remotewake-gateway
+          [[ "$("$binary" version)" == "RemoteWake Gateway $version" ]]
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove previously tracked web output
+        run: rm -rf internal/web/dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-web
+          path: internal/web/dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Build, package and verify all release assets
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RWG_SKIP_WEB: '1'
+        run: |
+          sh scripts/release.sh "$RELEASE_TAG"
+          node scripts/verify-release.mjs "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: dist/releases/${{ needs.prepare.outputs.tag }}/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    needs: [prepare, test, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Verify checksums and publish GitHub Release
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          sha256sum -c SHA256SUMS
+          assets=(*.tar.gz *.zip SHA256SUMS)
+          [[ ${#assets[@]} -eq 10 ]]
+          options=(--verify-tag --generate-notes --title "$RELEASE_TAG")
+          if [[ "$PRERELEASE" == true ]]; then
+            options+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" "${options[@]}"

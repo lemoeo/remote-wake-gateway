@@ -4,6 +4,30 @@
 
 当前版本：`0.1.0-dev`。已完成本地 Gateway 的第一版实现；真实设备与 NAS / 路由器兼容性仍需实机验收。完整设计见 [最终实现方案](docs/implementation-plan.md)，当前交付与验证边界见 [实现状态](docs/implementation-status.md)。
 
+## 下载发布版本
+
+在 [GitHub Releases](https://github.com/lemoeo/remote-wake-gateway/releases) 下载对应操作系统和 CPU 架构的压缩包，以及同一版本的 `SHA256SUMS`。macOS / Linux 使用 `.tar.gz`，Windows 使用 `.zip`；解压后进入包目录，程序位于 `bin/`，包内 `README.md` 提供快速启动说明，Linux 和 macOS 包附带对应服务模板。
+
+| 文件名中的平台标识 | 适用设备 |
+| --- | --- |
+| `darwin_amd64` / `darwin_arm64` | Intel Mac / Apple Silicon Mac |
+| `linux_amd64` / `linux_arm64` | x86-64 / ARM64 Linux、NAS、对应架构的 OpenWrt |
+| `linux_armv7` | ARMv7 32 位设备 |
+| `linux_mips` / `linux_mipsle` | 大端 / 小端 MIPS 32 位，均为 softfloat |
+| `windows_amd64` / `windows_arm64` | x86-64 / ARM64 Windows |
+
+例如下载 `v0.1.0` 的 Linux amd64 包，在保存附件的目录校验并解压：
+
+```sh
+# Linux；仅下载部分附件时，--ignore-missing 跳过未下载的平台包
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf remotewake-gateway_v0.1.0_linux_amd64.tar.gz
+cd remotewake-gateway_v0.1.0_linux_amd64
+./bin/remotewake-gateway version
+```
+
+macOS 使用 `shasum -a 256 文件名`，Windows PowerShell 使用 `Get-FileHash 文件名 -Algorithm SHA256`，将结果与 `SHA256SUMS` 中该附件的记录比较。OpenWrt / BusyBox 不支持上述 GNU 参数时，也可用 `sha256sum 文件名` 单独计算并比较。校验通过后再运行。平台名称表示构建目标，OpenWrt 固件、Windows ARM64 和实际广播效果仍需目标设备验证。
+
 ## 快速启动
 
 已构建二进制时直接运行：
@@ -105,6 +129,8 @@ sh scripts/build.sh
 
 脚本先构建 Vue 前端，再将静态资源嵌入 Go 二进制。仓库也保留当前构建产物，若只修改后端可运行 `RWG_SKIP_WEB=1 sh scripts/build.sh`。
 
+如需手动注入版本号，可使用 `RWG_VERSION=v0.1.0 sh scripts/build.sh`；未指定时保留源码中的开发版本号。Windows 目标自动输出 `.exe` 后缀。
+
 开发时可分别运行后端和 Vite；Vite 默认将 API 代理到 `127.0.0.1:9000`：
 
 ```sh
@@ -123,6 +149,39 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o bin/remotewake-gatew
 ```
 
 测试只使用模拟发送器、内存连接或本机回环地址，不向真实设备发送唤醒指令。自动化覆盖系统自动选择、手动网卡源地址选择、多 IPv4 地址、实际 UDP 数据传输及广播目标校验；真实子网广播仍需局域网实测。
+
+## 自动构建与发布 Release
+
+[发布工作流](.github/workflows/release.yml)在推送 `v*` 标签后运行。标签须为 `vMAJOR.MINOR.PATCH`，或带预发布后缀，如 `v0.1.0-rc.1`；版本数字段及纯数字预发布标识不允许前导零，暂不接受 `+build` 元数据。
+
+发布顺序：
+
+1. 校验版本标签，执行发布脚本参数测试、前端测试、TypeScript 检查并构建前端。
+2. 使用同一份新构建前端，在 Linux、macOS、Windows 原生环境运行 Go 测试和 `go vet`；Linux / macOS 同时运行竞态检测。
+3. 使用 `CGO_ENABLED=0` 编译上表的 9 个架构，将标签去掉 `v` 后注入程序版本号，打包服务模板及快速启动说明，生成 `SHA256SUMS`。
+4. 检查所有附件的清单、校验值、程序架构、版本、MIPS softfloat / ARMv7 设置，并执行构建机器对应程序的 `version` 命令。
+5. 所有测试和打包检查成功后，创建 GitHub Release、生成发布说明并上传 9 个压缩包和校验文件。预发布标签自动标记为 Prerelease，不设为 Latest；稳定版使用 GitHub 的默认 Latest 判定。
+
+工作流使用仓库自带的 `GITHUB_TOKEN`，仅发布任务申请 `contents: write`，无需额外配置个人令牌。仓库须允许 GitHub Actions 运行，且组织 / 仓库策略允许该任务申请发布权限。标签必须已经存在于远程，工作流不会代建标签，也不会覆盖已有版本或附件。GitHub CLI 先创建草稿并上传附件，再公开 Release；如果上传中断留下草稿，先检查并清理该草稿后重新运行，已公开版本的修正应使用新版本号。
+
+准备好待发布代码后，先提交并推送代码，再创建并推送标签。例如首次正式发布：
+
+```sh
+git push origin main
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+在 GitHub 的 Actions → Release 查看运行结果；测试或构建失败时不会进入公开发布步骤。版本号由标签控制，不需要为每次发布修改 Go 源码中的开发版本。
+
+也可以在 macOS / Linux 本机先验证全部发布包，需要 Go、Node.js、`tar`、`zip`、`unzip`，以及 `sha256sum` 或 `shasum`：
+
+```sh
+sh scripts/release.sh v0.1.0-rc.1
+node scripts/verify-release.mjs v0.1.0-rc.1
+```
+
+产物位于 `dist/releases/v0.1.0-rc.1/`，这些命令只构建本地文件，不创建 Git 标签或 GitHub Release。输出目录已存在时拒绝覆盖；可选传入目标列表进行局部构建，如 `sh scripts/release.sh v0.1.0-rc.2 linux-amd64 windows-amd64`，完整包验证器仅适用于默认的全部 9 个目标。已经构建前端时可设置 `RWG_SKIP_WEB=1` 跳过重复前端构建。
 
 ## Linux 与 NAS Docker
 
