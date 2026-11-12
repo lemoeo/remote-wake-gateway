@@ -3,17 +3,19 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { request, setCSRF, commandKey } from './api.mjs'
 import { interfaceOptions, suggestedBroadcasts, broadcastOnSelection, broadcastWarnings } from './wol-form.mjs'
 import type { Device, Job, Settings, BatchRow, DeviceDefaults, HistoryCleanup } from './types'
-import { runBatch, batchFinished } from './batch.mjs'
+import { runBatch, batchFinished, createBatchGuard } from './batch.mjs'
 import { useBatchPanel } from './batch-panel.mjs'
 import { createRealtime } from './realtime.mjs'
 import { matchesHistoryCleanup } from './history.mjs'
+import { createDeviceEditor } from './device-editor.mjs'
+import { createDeviceSync } from './device-sync.mjs'
 
 const loading = ref(true), authenticated = ref(false), initialized = ref(true), busy = ref(false)
 const password = ref(''), setupToken = ref(''), error = ref(''), notice = ref('')
 const page = ref('devices'), search = ref(''), devices = ref<Device[]>([]), jobs = ref<Job[]>([]), revision = ref(1)
 const recentJobs = ref<Job[]>([]), realtimeStatus = ref('connecting'), historyLoading = ref(false), historyDirty = ref(false), clock = ref(Date.now())
 let stopped = false, sessionEpoch = 0, historyRequest = 0, historyLoaded = false, historyVersion = 0
-let deviceLoad: Promise<void> | undefined, deviceDirty = false, deviceTimer: ReturnType<typeof setTimeout> | undefined, clockTimer: ReturnType<typeof setTimeout> | undefined
+let deviceLoad: Promise<void> | undefined, deviceDirty = false, clockTimer: ReturnType<typeof setTimeout> | undefined
 const gateway = ref({name: 'RemoteWake Gateway', version: '', gateway_id: '', uptime_seconds: 0})
 const settings = ref<Settings | null>(null), networks = ref('')
 const cleanupScope = ref('expired'), cleanupPreview = ref<HistoryCleanup | null>(null)
@@ -27,6 +29,8 @@ const modalOpen = computed(() => authenticated.value && Boolean(editing.value ||
 watch(modalOpen, open => document.body.classList.toggle('modal-open', open))
 const pendingKeys = new Map<string, string>()
 const optionalOpen = ref(false)
+const deviceEditor = createDeviceEditor({request,commandKey,confirmDelete:(message:string)=>confirm(message)})
+const deviceSync = createDeviceSync({load:loadDevices})
 const savedDeviceDefaults = ref<DeviceDefaults>({broadcast:'255.255.255.255',port:9,repeat:3})
 const chosen = ref<string[]>([]), batchRows = ref<BatchRow[]>([]), batchRunning = ref(false), batchStop = ref(false), batchMessage = ref(''), batchConfirming = ref(false)
 const canWake = (d: Device) => d.enabled && !d.active_job_id && (d.wake_method==='wol' || Boolean(d.password_configured))
@@ -41,7 +45,7 @@ const realtime = createRealtime({
   onJob: applyJob,
   onHistoryCleared: historyCleared,
   onMissing: missingJob,
-  onDevices: (target: number) => target ? scheduleDevices(target) : loadDevices(),
+  onDevices: (target: number) => target ? deviceSync.schedule(target) : loadDevices(),
   onStatus: (state: string) => {
     realtimeStatus.value = state
     if(state==='disconnected'&&historyLoaded)historyDirty.value=true
@@ -65,7 +69,7 @@ const latest = (id: string) => recentJobs.value.find(j => j.device_id === id)
 function observation(id: string) { const o = latest(id)?.observation; if(!o?.observed_at || clock.value-Date.parse(o.observed_at)>=60000) return '状态未知'; return o.state==='service_ready' ? 'VNC 已验证' : o.state==='reachable' ? '端口可达' : '状态未知' }
 function report(e: unknown) { if((e as {status?:number})?.status===401&&authenticated.value)endSession(); error.value = e instanceof Error ? e.message : '请求失败' }
 async function guarded(fn: () => Promise<void>) { if(busy.value)return; busy.value=true;error.value='';notice.value='';try{await fn()}catch(e){report(e)}finally{busy.value=false} }
-function endSession(){authenticated.value=false;sessionEpoch++;historyRequest++;realtime.stop();realtime.clear();setCSRF('');recentJobs.value=[];jobs.value=[];devices.value=[];selected.value=null;editing.value=null;chosen.value=[];batchRows.value=[];batchConfirming.value=false;historyCursor.value='';historyLoaded=false;historyDirty.value=false;cleanupPreview.value=null;historyLoading.value=false;deviceLoad=undefined;deviceDirty=false;page.value='devices';pendingKeys.clear();if(deviceTimer)clearTimeout(deviceTimer);if(clockTimer)clearTimeout(clockTimer)}
+function endSession(){authenticated.value=false;sessionEpoch++;historyRequest++;realtime.stop();realtime.clear();setCSRF('');recentJobs.value=[];jobs.value=[];devices.value=[];selected.value=null;editing.value=null;chosen.value=[];batchRows.value=[];batchConfirming.value=false;historyCursor.value='';historyLoaded=false;historyDirty.value=false;cleanupPreview.value=null;historyLoading.value=false;deviceLoad=undefined;deviceDirty=false;page.value='devices';pendingKeys.clear();deviceSync.cancel();if(clockTimer)clearTimeout(clockTimer)}
 function updateClock(){
   if(clockTimer)clearTimeout(clockTimer)
   clock.value=Date.now()
@@ -116,7 +120,6 @@ async function confirmCleanup(){await guarded(async()=>{
 })}
 async function loadDevices(target=0): Promise<void>{
   if(!authenticated.value||stopped||target&&target<=revision.value)return
-  if(deviceTimer){clearTimeout(deviceTimer);deviceTimer=undefined}
   deviceDirty=true
   if(deviceLoad)return deviceLoad
   const session=sessionEpoch
@@ -132,11 +135,6 @@ async function loadDevices(target=0): Promise<void>{
   })().finally(()=>{if(deviceLoad===pending)deviceLoad=undefined})
   deviceLoad=pending
   return pending
-}
-async function scheduleDevices(target: number){
-  if(target<=revision.value)return
-  if(deviceTimer)clearTimeout(deviceTimer)
-  deviceTimer=setTimeout(()=>{deviceTimer=undefined;loadDevices(target).catch(report)},60)
 }
 async function loadJobs(append=false){
   if(page.value!=='history'||!authenticated.value)return
@@ -160,15 +158,15 @@ async function load(){
 async function boot(){try{const session=await request('/auth/session');initialized.value=session.initialized;authenticated.value=session.authenticated;setCSRF(session.csrf_token);if(authenticated.value)await load()}catch(e){report(e)}finally{loading.value=false}}
 async function login(){await guarded(async()=>{if(!initialized.value){await request('/auth/setup',{method:'POST',body:JSON.stringify({token:setupToken.value,password:password.value})});initialized.value=true;setupToken.value=''}const data=await request('/auth/session',{method:'POST',body:JSON.stringify({password:password.value})});password.value='';page.value='devices';sessionEpoch++;setCSRF(data.csrf_token);authenticated.value=true;await load()})}
 async function logout(){await guarded(async()=>{await request('/auth/session',{method:'DELETE'});endSession()})}
-async function refreshStatus(){await guarded(async()=>{if(realtime.connected())await realtime.synchronize();else{await loadDevices();realtime.start()}})}
+async function refreshStatus(){await guarded(async()=>{await realtime.refresh()})}
 watch(page,p=>{if(authenticated.value&&p==='history')loadJobs().catch(report)})
-function onVisibility(){if(!document.hidden&&authenticated.value&&realtime.connected())realtime.synchronize().catch(report)}
+function onVisibility(){if(!document.hidden&&authenticated.value&&realtime.connected())realtime.refresh().catch(report)}
 async function openJob(id?:string){if(id)selected.value=await realtime.readJob(id)}
-function newDevice(){isNew.value=true;optionalOpen.value=false;vncPassword.value='';clearPassword.value=false;const defaults=savedDeviceDefaults.value;editing.value={id:'',name:'',type:'pc',enabled:true,revision:0,wake_method:'wol',ip:'',note:'',wol:{mac:'',broadcast:defaults.broadcast,interface:'',port:defaults.port,repeat:defaults.repeat,interval_ms:100},vnc:{port:5900,username:'',hold_seconds:0},probe:{enabled:false,port:22,timeout_seconds:60}}}
+function newDevice(){deviceEditor.begin();isNew.value=true;optionalOpen.value=false;vncPassword.value='';clearPassword.value=false;const defaults=savedDeviceDefaults.value;editing.value={id:'',name:'',type:'pc',enabled:true,revision:0,wake_method:'wol',ip:'',note:'',wol:{mac:'',broadcast:defaults.broadcast,interface:'',port:defaults.port,repeat:defaults.repeat,interval_ms:100},vnc:{port:5900,username:'',hold_seconds:0},probe:{enabled:false,port:22,timeout_seconds:60}}}
 function edit(d: Device){isNew.value=false;optionalOpen.value=Boolean(d.note||(d.wake_method==='wol'&&(d.ip||d.probe.enabled)));editing.value=JSON.parse(JSON.stringify(d));vncPassword.value='';clearPassword.value=false}
 function chooseInterface(){if(!editing.value)return;editing.value.wol.broadcast=broadcastOnSelection(interfaces.value,editing.value.wol.interface,editing.value.wol.broadcast)}
-async function saveDevice(){await guarded(async()=>{if(!editing.value)return;const d={...editing.value, id:isNew.value?undefined:editing.value.id, vnc_password:vncPassword.value||undefined, clear_vnc_password:clearPassword.value};await request('/devices'+(isNew.value?'':'/'+d.id),{method:isNew.value?'POST':'PUT',body:JSON.stringify(d)});editing.value=null;vncPassword.value='';await loadDevices();notice.value='设备已保存'})}
-async function remove(d: Device){if(!confirm(`删除“${d.name}”？历史任务会保留。`))return;await guarded(async()=>{await request('/devices/'+d.id,{method:'DELETE',headers:{'If-Match':String(d.revision)}});await loadDevices();notice.value='设备已删除'})}
+async function saveDevice(){await guarded(async()=>{if(!editing.value)return;const d={...editing.value, id:isNew.value?undefined:editing.value.id, vnc_password:vncPassword.value||undefined, clear_vnc_password:clearPassword.value};await deviceEditor.save(d,isNew.value);editing.value=null;vncPassword.value='';await loadDevices();notice.value='设备已保存'})}
+async function remove(d: Device){await guarded(async()=>{const deleted=await deviceEditor.remove(d,(id:string)=>{if(editing.value?.id===id)editing.value=null});if(deleted){await loadDevices();notice.value='设备已删除'}})}
 function showSubmission(job: Job, action: string, existing=false){
   if(action==='wake')notice.value=existing?'已有相关任务正在处理，可在设备卡片查看进度和详情。':'已提交唤醒任务，可在设备卡片查看进度和结果。'
   else selected.value=job
@@ -205,14 +203,16 @@ function toggleAll(){if(allChosen.value){const visible=new Set(selectable.value.
 async function continueBatch(){
   if(batchRunning.value||busy.value)return
   if(!realtime.connected()){error.value='请等待实时连接恢复，或点击刷新状态后再继续';return}
+  const guard=createBatchGuard({generation:()=>realtime.generation,session:()=>sessionEpoch})
+  const owner=sessionEpoch
   resetBatchPanel();batchRunning.value=true;batchStop.value=false;error.value='';batchMessage.value=''
   try {
     const result=await runBatch(batchRows.value,{
       submit:(id:string,key:string)=>realtime.submit(id,key),
       getJob:(id:string)=>realtime.readJob(id),
-      waitForJob:realtime.waitForJob,
-      shouldStop:()=>batchStop.value||stopped||!authenticated.value||!realtime.connected(),
-      onUpdate:(row:BatchRow)=>{if(batchFinished(row.status)&&pendingKeys.get(row.device_id+':wake')===row.command_id)pendingKeys.delete(row.device_id+':wake')},
+      waitForJob:(job:Job,update:(job:Job)=>void)=>{guard.assertCurrent();return realtime.waitForJob(job,update)},
+      shouldStop:()=>guard.interrupted()||batchStop.value||stopped||!authenticated.value||!realtime.connected(),
+      onUpdate:(row:BatchRow)=>{if(owner===sessionEpoch&&batchFinished(row.status)&&pendingKeys.get(row.device_id+':wake')===row.command_id)pendingKeys.delete(row.device_id+':wake')},
     })
     batchMessage.value=result.message||(result.paused?'批次已暂停，请继续确认已有任务结果。':'本批次已处理完成，请查看各设备结果。')
   }catch(e){report(e)}finally{batchRunning.value=false}
@@ -226,7 +226,7 @@ async function startBatch(){
   await continueBatch()
 }
 function batchRowStatus(row:BatchRow){return row.status==='pending'&&!row.job_id?'未提交':statusName(row.status)}
-onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()});onUnmounted(()=>{stopped=true;realtime.stop();if(deviceTimer)clearTimeout(deviceTimer);if(clockTimer)clearTimeout(clockTimer);document.removeEventListener('visibilitychange',onVisibility);document.body.classList.remove('modal-open')})
+onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()});onUnmounted(()=>{stopped=true;realtime.stop();deviceSync.cancel();if(clockTimer)clearTimeout(clockTimer);document.removeEventListener('visibilitychange',onVisibility);document.body.classList.remove('modal-open')})
 </script>
 
 <template>
@@ -329,7 +329,7 @@ onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()
           <div class="device-modal-footer">
             <p v-if="error" class="alert error" role="alert">{{ error }}</p>
             <div class="modal-actions">
-              <button v-if="!isNew" type="button" class="danger text-button" :disabled="busy" @click="remove(editing).then(()=>{if(!error)editing=null})">删除设备</button>
+              <button v-if="!isNew" type="button" class="danger text-button" :disabled="busy" @click="remove(editing)">删除设备</button>
               <span></span>
               <button type="button" class="secondary" :disabled="busy" @click="editing=null">取消</button>
               <button type="submit" class="primary" :disabled="busy">{{ busy?'保存中…':'保存设备' }}</button>

@@ -47,9 +47,7 @@ export function createRealtime({ request, createSource = url => new EventSource(
       try { job = await request('/wake-jobs/' + encodeURIComponent(id)) }
       catch (error) {
         if (error.status === 404 && mark.generation === generation) {
-          records.delete(id)
-          for (const waiter of [...(waiters.get(id) || [])]) waiter.reject(new Error('任务记录已清理，无法确认结果，请查看历史记录'))
-          onMissing(id)
+          forgetJob(id)
         }
         throw error
       }
@@ -118,6 +116,18 @@ export function createRealtime({ request, createSource = url => new EventSource(
     if (current !== generation || stopped) throw interrupted()
     if (status === 'stale') setStatus(fault ? 'blocked' : 'connected')
   }
+  async function refresh() {
+    // Manual reconciliation must work even if EventSource is unavailable.
+    try { await synchronize() }
+    catch (error) {
+      if (source && status === 'connected') markStale()
+      throw error
+    }
+    if (!source && !stopped) open()
+  }
+  function markStale() {
+    generation++; reads.clear(); rejectWaiters(interrupted()); setStatus('stale')
+  }
   async function checkSession() {
     if (authCheck || stopped) return
     const current = generation
@@ -130,7 +140,8 @@ export function createRealtime({ request, createSource = url => new EventSource(
     return authCheck
   }
   function open() {
-    if (stopped) return
+    if (stopped || source) return
+    clearTimeout(retryTimer); retryTimer = undefined
     let stream
     try { stream = createSource('/api/v1/events') }
     catch { setStatus('unsupported'); initialDone(false); return }
@@ -160,8 +171,17 @@ export function createRealtime({ request, createSource = url => new EventSource(
     stream.addEventListener('history.invalidated', () => {
       if (!stopped && source === stream) clearHistory(null)
     })
+    stream.addEventListener('history.removed', event => {
+      if (stopped || source !== stream) return
+      cleanupClock = ++clock
+      for (const id of JSON.parse(event.data).job_ids) forgetJob(id)
+    })
     stream.addEventListener('devices.changed', event => {
-      if (!stopped && source === stream) Promise.resolve(onDevices(JSON.parse(event.data).revision)).catch(() => setStatus('stale'))
+      if (stopped || source !== stream) return
+      const current = generation
+      Promise.resolve(onDevices(JSON.parse(event.data).revision)).catch(() => {
+        if (current === generation && source === stream && !stopped) markStale()
+      })
     })
     stream.addEventListener('storage.error', event => {
       if (stopped || source !== stream) return
@@ -196,6 +216,11 @@ export function createRealtime({ request, createSource = url => new EventSource(
     clearTimeout(retryTimer); reads.clear(); rejectWaiters(interrupted()); setStatus('closed')
   }
   function clear() { records.clear(); clock++; fault = '' }
+  function forgetJob(id) {
+    records.delete(id)
+    for (const waiter of [...(waiters.get(id) || [])]) waiter.reject(new Error('任务记录已清理，无法确认结果，请查看历史记录'))
+    onMissing(id)
+  }
   function clearHistory(plan) {
     cleanupClock = ++clock
     const ids = []
@@ -205,6 +230,6 @@ export function createRealtime({ request, createSource = url => new EventSource(
     onHistoryCleared(plan, ids)
   }
   const newer = (job, mark) => records.get(job.job_id)?.clock > mark.clock ? records.get(job.job_id).job : job
-  return { start, stop, clear, clearHistory, checkpoint, remember, newer, readJob, submit, waitForJob, synchronize, overlayDevices, connected, values,
+  return { start, stop, clear, clearHistory, checkpoint, remember, newer, readJob, submit, waitForJob, synchronize, refresh, overlayDevices, connected, values,
     get generation() { return generation } }
 }

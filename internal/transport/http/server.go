@@ -241,7 +241,13 @@ func (s *Server) saveDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, model.Error(422, "id_mismatch", "设备 ID 不一致"))
 		return
 	}
-	d, e := s.App.SaveDevice(v.Device, v.Password, v.ClearPassword, create)
+	var d model.Device
+	var e error
+	if create {
+		d, e = s.App.CreateDevice(v.Device, v.Password, v.ClearPassword, r.Header.Get("Idempotency-Key"))
+	} else {
+		d, e = s.App.SaveDevice(v.Device, v.Password, v.ClearPassword, false)
+	}
 	if e != nil {
 		writeError(w, e)
 		return
@@ -335,29 +341,12 @@ func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 	after := r.URL.Query().Get("after")
-	started := after == ""
-	out := []model.Job{}
-	next := ""
-	for _, j := range s.App.Jobs() {
-		if !started {
-			if j.ID == after {
-				started = true
-			}
-			continue
-		}
-		if id := r.URL.Query().Get("device_id"); id != "" && j.DeviceID != id {
-			continue
-		}
-		if status := r.URL.Query().Get("status"); status != "" && j.Status != status {
-			continue
-		}
-		if len(out) == limit {
-			next = out[len(out)-1].ID
-			break
-		}
-		out = append(out, j)
+	page, err := s.App.ListJobs(app.JobQuery{Limit: limit, After: after, DeviceID: r.URL.Query().Get("device_id"), Status: r.URL.Query().Get("status")})
+	if err != nil {
+		writeError(w, err)
+		return
 	}
-	reply(w, 200, map[string]any{"jobs": out, "next_cursor": next})
+	reply(w, 200, page)
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	var v model.Config

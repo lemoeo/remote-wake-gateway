@@ -36,27 +36,31 @@ type task struct {
 	cancel context.CancelFunc
 }
 type Service struct {
-	mu           sync.Mutex
-	fs           *storage.Store
-	cfg          model.Config
-	desired      model.Config
-	creds        *credentials.Store
-	devices      model.DeviceFile
-	jobs         map[string]*model.Job
-	commands     map[string]string
-	active       map[string]string
-	targets      map[string]string
-	cancels      map[string]context.CancelFunc
-	policy       Policy
-	queue        chan task
-	vncSlots     chan struct{}
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	closed       bool
-	storageErr   error
-	subscribers  map[chan Event]struct{}
-	eventsClosed bool
+	mu               sync.Mutex
+	fs               *storage.Store
+	cfg              model.Config
+	desired          model.Config
+	creds            *credentials.Store
+	devices          model.DeviceFile
+	jobs             map[string]*model.Job
+	jobOrder         []jobKey
+	cleanupMu        sync.Mutex
+	nextHistorySweep time.Time
+	removeJobFile    func(string) error
+	commands         map[string]string
+	active           map[string]string
+	targets          map[string]string
+	cancels          map[string]context.CancelFunc
+	policy           Policy
+	queue            chan task
+	vncSlots         chan struct{}
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	closed           bool
+	storageErr       error
+	subscribers      map[chan Event]struct{}
+	eventsClosed     bool
 	// Network adapters are replaceable in tests and independent of HTTP/MQTT.
 	SendWoL func(context.Context, model.WoL) error
 	VNC     func(context.Context, macvnc.Options) (macvnc.Evidence, error)
@@ -88,6 +92,7 @@ func New(fs *storage.Store) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{fs: fs, cfg: cfg, creds: creds, devices: model.DeviceFile{SchemaVersion: model.Schema, Revision: 1, Devices: []model.Device{}}, jobs: map[string]*model.Job{}, commands: map[string]string{}, active: map[string]string{}, targets: map[string]string{}, cancels: map[string]context.CancelFunc{}, policy: Policy{SchemaVersion: model.Schema, Targets: map[string]Guard{}}, queue: make(chan task, cfg.QueueSize), vncSlots: make(chan struct{}, cfg.MaxVNC), ctx: ctx, cancel: cancel, SendWoL: wol.Send, VNC: macvnc.Run, Probe: probe.TCP}
 	s.desired = cfg
+	s.removeJobFile = os.Remove
 	if err = s.load(); err != nil {
 		cancel()
 		return nil, err
@@ -169,7 +174,11 @@ func (s *Service) load() error {
 		s.jobs[j.ID] = &j
 		s.commands[j.CommandID] = j.ID
 	}
-	return s.cleanupLocked()
+	if err := s.cleanupLocked(); err != nil {
+		return err
+	}
+	s.rebuildJobOrderLocked()
+	return nil
 }
 func (s *Service) Config() model.Config {
 	s.mu.Lock()
@@ -248,6 +257,10 @@ func (s *Service) Devices() model.DeviceFile {
 	return out
 }
 func (s *Service) SaveDevice(d model.Device, password *string, clearPassword bool, create bool) (model.Device, error) {
+	return s.saveDevice(d, password, clearPassword, create, false)
+}
+
+func (s *Service) saveDevice(d model.Device, password *string, clearPassword bool, create, replayCreate bool) (model.Device, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.writable(); e != nil {
@@ -280,6 +293,9 @@ func (s *Service) SaveDevice(d model.Device, password *string, clearPassword boo
 	}
 	old, exists := s.device(d.ID)
 	if create && exists {
+		if replayCreate {
+			return s.replayDeviceCreationLocked(d, old, password, clearPassword)
+		}
 		return d, model.Error(409, "device_exists", "设备 ID 已存在")
 	}
 	if !create && !exists {
@@ -468,6 +484,16 @@ func (s *Service) UpdateSettings(c model.Config) error {
 	return nil
 }
 func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, error) {
+	// Expired-file IO runs outside the application lock. Do not expire a known
+	// command as a side effect of its own idempotent retry.
+	s.mu.Lock()
+	known := s.commands[cmd.CommandID] != ""
+	s.mu.Unlock()
+	if !known {
+		if err := s.cleanupExpired(ctx); err != nil {
+			return model.Job{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.writable(); e != nil {
@@ -537,9 +563,6 @@ func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, err
 	if len(s.queue) >= cap(s.queue) {
 		return model.Job{}, model.Error(503, "queue_full", "任务队列已满")
 	}
-	if e := s.cleanupLocked(); e != nil {
-		return model.Job{}, e
-	}
 	if len(s.jobs) >= s.cfg.MaxJobs {
 		return model.Job{}, model.Error(503, "job_limit", "任务存储已满，请归档历史")
 	}
@@ -548,6 +571,7 @@ func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, err
 		return model.Job{}, e
 	}
 	s.jobs[j.ID] = &j
+	s.indexJobLocked(j)
 	s.commands[cmd.CommandID] = j.ID
 	s.active[d.ID] = j.ID
 	if d.HasVNC() && cmd.Action == "wake" {
@@ -570,12 +594,14 @@ func (s *Service) Get(id string) (model.Job, error) {
 }
 func (s *Service) Jobs() []model.Job {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	out := make([]model.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		out = append(out, j.Clone())
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	s.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		return keyBefore(jobKey{out[i].ID, out[i].CreatedAt}, jobKey{out[j].ID, out[j].CreatedAt})
+	})
 	return out
 }
 func (s *Service) Cancel(id string) error {

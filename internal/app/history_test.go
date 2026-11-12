@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,8 +22,106 @@ func seedHistory(t *testing.T, s *Service, id, status string, finished, expires 
 		t.Fatal(err)
 	}
 	s.jobs[id] = &j
+	s.indexJobLocked(j)
 	s.commands[j.CommandID] = id
 	return j
+}
+
+func TestHistoryDeletionDoesNotHoldApplicationLock(t *testing.T) {
+	s, _ := testService(t)
+	d := addMac(t, s, "live_during_cleanup")
+	s.VNC = func(context.Context, macvnc.Options) (macvnc.Evidence, error) {
+		return macvnc.Evidence{Authenticated: true}, nil
+	}
+	now := time.Now().Add(-time.Hour)
+	seedHistory(t, s, "job_slow_delete", "success", now, now)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	s.removeJobFile = func(path string) error { close(entered); <-release; return os.Remove(path) }
+	plan, err := s.PreviewHistoryCleanup("completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := s.CleanupHistory(context.Background(), plan.Scope, plan.Before); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cleanup not started")
+	}
+	if _, err = s.CleanupHistory(context.Background(), plan.Scope, plan.Before); code(err) != "cleanup_busy" {
+		t.Fatal("parallel cleanup allowed")
+	}
+	reads := make(chan error, 1)
+	go func() {
+		if len(s.Devices().Devices) != 1 {
+			reads <- fmt.Errorf("device snapshot lost")
+			return
+		}
+		if _, err := s.ListJobs(JobQuery{Limit: 50}); err != nil {
+			reads <- err
+			return
+		}
+		j, err := s.Submit(context.Background(), command(d.ID, "during_cleanup"))
+		if err == nil {
+			_, err = s.Get(j.ID)
+		}
+		reads <- err
+	}()
+	select {
+	case err := <-reads:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("file deletion blocked readers or task submission")
+	}
+	once.Do(func() { close(release) })
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAutomaticHistorySweepIsBoundedAndReportsExactIDs(t *testing.T) {
+	s, _ := testService(t)
+	d := addMac(t, s, "bounded_sweep")
+	s.VNC = func(context.Context, macvnc.Options) (macvnc.Evidence, error) {
+		return macvnc.Evidence{Authenticated: true}, nil
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	for i := range historySweepBatch + 9 {
+		seedHistory(t, s, fmt.Sprintf("job_expired_%03d", i), "success", old, old)
+	}
+	stream, cancel, err := s.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	j, err := s.Submit(context.Background(), command(d.ID, "bounded_sweep_cmd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := nextEvent(t, stream)
+	if event.Type != "history.removed" || len(event.JobIDs) != historySweepBatch {
+		t.Fatalf("sweep notification: %+v", event)
+	}
+	remaining := 0
+	for _, j := range s.Jobs() {
+		if j.CreatedAt.Before(time.Now().Add(-7 * 24 * time.Hour)) {
+			remaining++
+		}
+	}
+	if remaining != 9 {
+		t.Fatalf("unbounded sweep: remaining=%d", remaining)
+	}
+	retry, err := s.Submit(context.Background(), command(d.ID, "bounded_sweep_cmd"))
+	if err != nil || retry.ID != j.ID {
+		t.Fatal("known-command retry changed during cleanup")
+	}
+	if len(s.Jobs()) != 10 {
+		t.Fatal("known-command retry ran another sweep")
+	}
 }
 
 func TestHistoryCleanupPreviewScopesAndReplayProtection(t *testing.T) {

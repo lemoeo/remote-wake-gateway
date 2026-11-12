@@ -1,6 +1,16 @@
 const active = job => ['pending', 'running'].includes(job.status)
 const finished = new Set(['success', 'partial', 'failed', 'timeout', 'cancelled', 'expired', 'interrupted'])
 
+// A reconnect or a new login cannot revive an already-started batch. Only an
+// explicit Continue creates a new guard for the current connection/session.
+export function createBatchGuard({ generation, session }) {
+  const connection = generation(), owner = session()
+  const interrupted = () => connection !== generation() || owner !== session()
+  return { interrupted, assertCurrent() {
+    if (interrupted()) throw new Error('连接或登录会话已改变，已暂停后续提交；请点击“继续未完成”确认已有任务。')
+  } }
+}
+
 // Submit one device at a time and await its existing WakeJob. No separate wake
 // engine, unlimited queue or automatic retry of an uncertain command is used.
 export async function runBatch(rows, { submit, getJob, waitForJob, shouldStop = () => false, onUpdate = (_row) => {} }) {

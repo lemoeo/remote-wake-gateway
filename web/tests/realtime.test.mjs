@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRealtime } from '../src/realtime.mjs'
-import { runBatch } from '../src/batch.mjs'
+import { runBatch, createBatchGuard } from '../src/batch.mjs'
+import { createDeviceSync } from '../src/device-sync.mjs'
 
 const job = (status='running', id='j1') => ({job_id:id,device_id:'pc',status,created_at:'2026-01-01T00:00:00Z'})
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b)=>{resolve=a;reject=b}); return {promise,resolve,reject} }
@@ -168,4 +169,68 @@ test('reconnecting a task removed by cleanup does not enter a reconnect loop',as
   live.remember(job())
   sources[0].onerror();await sources[0].emit('resync',{ready:true})
   assert.equal(live.connected(),true);assert.deepEqual(missing,['j1']);assert.deepEqual(live.values(),[])
+})
+test('disconnect before POST response stays paused after reconnect until explicit continuation',async t=>{
+  const response=deferred(),submitted=[]
+  const done=id=>({job_id:'job_'+id,device_id:id,status:'success'})
+  const {live,sources}=await fixture(t,{request:async path=>{
+    if(path==='/auth/session')return {authenticated:true}
+    if(path==='/devices/pc/wake'){submitted.push('pc');return response.promise}
+    if(path==='/devices/mac/wake'){submitted.push('mac');return done('mac')}
+    if(path==='/wake-jobs/job_pc')return done('pc')
+    throw Error(path)
+  }})
+  const rows=['pc','mac'].map(id=>({device_id:id,command_id:'cmd_'+id,status:'pending'}))
+  const adapters=guard=>({submit:live.submit,getJob:live.readJob,waitForJob:(j,update)=>{guard.assertCurrent();return live.waitForJob(j,update)},shouldStop:()=>guard.interrupted()||!live.connected()})
+  const guard=createBatchGuard({generation:()=>live.generation,session:()=>1})
+  const running=runBatch(rows,adapters(guard))
+  await Promise.resolve();sources[0].onerror();await sources[0].emit('resync',{ready:true})
+  response.resolve({...done('pc'),status:'pending'})
+  assert.equal((await running).paused,true)
+  assert.deepEqual(submitted,['pc']);assert.equal(rows[1].status,'pending')
+  await runBatch(rows,adapters(createBatchGuard({generation:()=>live.generation,session:()=>1})))
+  assert.deepEqual(submitted,['pc','mac'])
+})
+test('a new login cannot continue a previous session batch',async t=>{
+  let session=1
+  const response=deferred(),submits=[]
+  const {live,sources}=await fixture(t,{request:async path=>{submits.push(path);return response.promise}})
+  const guard=createBatchGuard({generation:()=>live.generation,session:()=>session})
+  const rows=['pc','mac'].map(id=>({device_id:id,command_id:'cmd_'+id,status:'pending'}))
+  const running=runBatch(rows,{submit:live.submit,getJob:live.readJob,waitForJob:(j,update)=>{guard.assertCurrent();return live.waitForJob(j,update)},shouldStop:guard.interrupted})
+  await Promise.resolve();live.stop();session++;live.start();await sources[1].emit('resync',{ready:true})
+  response.resolve({job_id:'old_job',device_id:'pc',status:'running'})
+  assert.equal((await running).paused,true)
+  assert.deepEqual(submits,['/devices/pc/wake']);assert.equal(rows[0].job_id,'old_job')
+})
+test('failed device invalidation marks synchronization stale and refresh recovers without polling',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']})
+  let fail=true
+  const loads=[]
+  const sync=createDeviceSync({load:async revision=>{loads.push(revision);if(fail)throw Error('snapshot failed')}})
+  const {live,sources,statuses,calls}=await fixture(t,{onDevices:revision=>revision?sync.schedule(revision):Promise.resolve()})
+  const guard=createBatchGuard({generation:()=>live.generation,session:()=>1})
+  sources[0].emit('devices.changed',{revision:2});sources[0].emit('devices.changed',{revision:3})
+  t.mock.timers.tick(60);await new Promise(resolve=>setImmediate(resolve))
+  assert.equal(statuses.at(-1),'stale');assert.equal(live.connected(),false)
+  fail=false;await live.refresh()
+  assert.equal(live.connected(),true);assert.equal(guard.interrupted(),true)
+  assert.deepEqual(loads,[3]);assert.deepEqual(calls,['/api/v1/events'])
+})
+test('manual refresh reconciles known jobs without EventSource support or a recent-job list',async t=>{
+  const calls=[];let devices=0
+  const live=createRealtime({createSource:()=>{throw Error('unsupported')},onDevices:async()=>devices++,request:async path=>{calls.push(path);return {...job('success')}}})
+  t.after(()=>live.stop());await live.start();live.remember(job())
+  await live.refresh()
+  assert.equal(devices,1);assert.deepEqual(calls,['/wake-jobs/j1'])
+  assert.equal(live.values()[0].status,'success');assert.equal(live.connected(),false)
+})
+test('bounded automatic cleanup evicts only announced IDs without a history fetch',async t=>{
+  const missing=[]
+  const {live,sources,calls}=await fixture(t,{onMissing:id=>missing.push(id)})
+  live.remember(job('success','expired'));live.remember(job('success','retained'));live.remember(job('running','active'))
+  sources[0].emit('history.removed',{job_ids:['expired']})
+  assert.deepEqual(missing,['expired'])
+  assert.deepEqual(live.values().map(j=>j.job_id).sort(),['active','retained'])
+  assert.deepEqual(calls,['/api/v1/events'])
 })

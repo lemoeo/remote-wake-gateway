@@ -13,6 +13,7 @@ type Event struct {
 	Message  string          `json:"message,omitempty"`
 	Revision int             `json:"revision,omitempty"`
 	Cleanup  *HistoryCleanup `json:"cleanup,omitempty"`
+	JobIDs   []string        `json:"job_ids,omitempty"`
 }
 
 func (s *Service) Subscribe() (<-chan Event, func(), error) {
