@@ -23,16 +23,17 @@ import (
 )
 
 type Server struct {
-	App       *app.Service
-	Auth      *auth.Auth
-	Version   string
-	started   time.Time
-	publicURL *url.URL
-	handler   http.Handler
+	App             *app.Service
+	Auth            *auth.Auth
+	Version         string
+	started         time.Time
+	publicURL       *url.URL
+	handler         http.Handler
+	streamHeartbeat time.Duration
 }
 
 func New(service *app.Service, a *auth.Auth, version string) (*Server, error) {
-	s := &Server{App: service, Auth: a, Version: version, started: time.Now()}
+	s := &Server{App: service, Auth: a, Version: version, started: time.Now(), streamHeartbeat: 15 * time.Second}
 	if raw := service.Config().PublicURL; raw != "" {
 		u, e := url.Parse(raw)
 		if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.User != nil {
@@ -68,6 +69,7 @@ func New(service *app.Service, a *auth.Auth, version string) (*Server, error) {
 		reply(w, 200, v)
 	}))
 	mux.HandleFunc("GET /api/v1/devices", s.protect(func(w http.ResponseWriter, r *http.Request) { reply(w, 200, s.App.Devices()) }))
+	mux.HandleFunc("GET /api/v1/events", s.protect(s.events))
 	mux.HandleFunc("POST /api/v1/devices", s.protect(s.saveDevice))
 	mux.HandleFunc("PUT /api/v1/devices/{id}", s.protect(s.saveDevice))
 	mux.HandleFunc("DELETE /api/v1/devices/{id}", s.protect(s.deleteDevice))
@@ -83,6 +85,8 @@ func New(service *app.Service, a *auth.Auth, version string) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/devices/{id}/wake", s.protect(s.submit))
 	mux.HandleFunc("POST /api/v1/devices/{id}/probe", s.protect(s.submit))
 	mux.HandleFunc("GET /api/v1/wake-jobs", s.protect(s.jobs))
+	mux.HandleFunc("GET /api/v1/wake-jobs/cleanup", s.protect(s.previewHistoryCleanup))
+	mux.HandleFunc("POST /api/v1/wake-jobs/cleanup", s.protect(s.cleanupHistory))
 	mux.HandleFunc("GET /api/v1/wake-jobs/{id}", s.protect(s.getJob))
 	mux.HandleFunc("POST /api/v1/wake-jobs/{id}/cancel", s.protect(func(w http.ResponseWriter, r *http.Request) {
 		if e := s.App.Cancel(r.PathValue("id")); e != nil {
@@ -372,7 +376,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runtime := s.App.Config()
-	restartRequired := runtime.Listen != v.Listen || runtime.PublicURL != v.PublicURL || runtime.MaxConcurrent != v.MaxConcurrent || runtime.MaxVNC != v.MaxVNC || runtime.QueueSize != v.QueueSize || runtime.RetentionDays != v.RetentionDays || runtime.MaxJobs != v.MaxJobs
+	restartRequired := runtime.Listen != v.Listen || runtime.PublicURL != v.PublicURL || runtime.MaxConcurrent != v.MaxConcurrent || runtime.MaxVNC != v.MaxVNC || runtime.QueueSize != v.QueueSize || runtime.RetentionDays != v.RetentionDays
 	reply(w, 200, map[string]bool{"saved": true, "restart_required": restartRequired})
 }
 func (s *Server) export(w http.ResponseWriter, r *http.Request) {

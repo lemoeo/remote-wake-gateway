@@ -1,0 +1,13 @@
+.connection{gap:8px;min-width:0}
+.connection>span{max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.connection.degraded i{background:#c39754;box-shadow:0 0 0 3px #c3975415}
+.connection .text-button{font-size:11px;white-space:nowrap}
+.history-update{padding:10px 14px;border-radius:8px;background:#eef5f0;color:#527464;font-size:12px}
+.last-operation{align-items:center;flex-wrap:wrap;gap:6px 10px}
+.last-operation time{flex:1;white-space:nowrap}
+.last-operation .text-button{font-size:10px;padding:0;white-space:nowrap}
+.history-cleanup>label{max-width:360px}
+.cleanup-confirm{margin-top:18px;padding:18px;border:1px solid #eedbd2;border-radius:8px;background:#fffaf7;font-size:12px}
+.cleanup-confirm strong{color:#a96555}
+.cleanup-confirm .button-row{flex-wrap:wrap;margin-top:14px}
+@media(max-width:600px){.connection>span{max-width:105px}.connection{gap:6px}.connection .text-button{font-size:10px}}

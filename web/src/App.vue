@@ -2,15 +2,21 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { request, setCSRF, commandKey } from './api.mjs'
 import { interfaceOptions, suggestedBroadcasts, broadcastOnSelection, broadcastWarnings } from './wol-form.mjs'
-import type { Device, Job, Settings, BatchRow, DeviceDefaults } from './types'
+import type { Device, Job, Settings, BatchRow, DeviceDefaults, HistoryCleanup } from './types'
 import { runBatch, batchFinished } from './batch.mjs'
 import { useBatchPanel } from './batch-panel.mjs'
+import { createRealtime } from './realtime.mjs'
+import { matchesHistoryCleanup } from './history.mjs'
 
 const loading = ref(true), authenticated = ref(false), initialized = ref(true), busy = ref(false)
 const password = ref(''), setupToken = ref(''), error = ref(''), notice = ref('')
 const page = ref('devices'), search = ref(''), devices = ref<Device[]>([]), jobs = ref<Job[]>([]), revision = ref(1)
+const recentJobs = ref<Job[]>([]), realtimeStatus = ref('connecting'), historyLoading = ref(false), historyDirty = ref(false), clock = ref(Date.now())
+let stopped = false, sessionEpoch = 0, historyRequest = 0, historyLoaded = false, historyVersion = 0
+let deviceLoad: Promise<void> | undefined, deviceDirty = false, deviceTimer: ReturnType<typeof setTimeout> | undefined, clockTimer: ReturnType<typeof setTimeout> | undefined
 const gateway = ref({name: 'RemoteWake Gateway', version: '', gateway_id: '', uptime_seconds: 0})
 const settings = ref<Settings | null>(null), networks = ref('')
+const cleanupScope = ref('expired'), cleanupPreview = ref<HistoryCleanup | null>(null)
 const interfaces = ref<{name: string; ip: string; broadcast: string}[]>([])
 const editing = ref<Device | null>(null), isNew = ref(false), vncPassword = ref(''), clearPassword = ref(false)
 const sendInterfaces = computed(() => interfaceOptions(interfaces.value))
@@ -29,52 +35,187 @@ const allChosen = computed(() => selectable.value.length>0 && selectable.value.e
 const someChosen = computed(() => selectable.value.some(d=>chosen.value.includes(d.id)) && !allChosen.value)
 const batchPending = computed(() => batchRows.value.some(r=>!batchFinished(r.status)))
 const { visible: batchVisible, collapsed: batchCollapsed, summary: batchSummary, reset: resetBatchPanel, toggle: toggleBatchPanel, close: closeBatchPanel } = useBatchPanel(batchRows, batchRunning)
-let timer: ReturnType<typeof setTimeout> | undefined
-let stopped = false, failures = 0
 const active = (j: Job) => ['pending', 'running'].includes(j.status)
+const realtime = createRealtime({
+  request,
+  onJob: applyJob,
+  onHistoryCleared: historyCleared,
+  onMissing: missingJob,
+  onDevices: (target: number) => target ? scheduleDevices(target) : loadDevices(),
+  onStatus: (state: string) => {
+    realtimeStatus.value = state
+    if(state==='disconnected'&&historyLoaded)historyDirty.value=true
+  },
+  onAuthExpired: () => { endSession(); error.value='会话已过期，请重新登录' },
+  getActiveIDs: () => [
+    ...devices.value.map(d=>d.active_job_id),
+    ...jobs.value.filter(active).map(j=>j.job_id),
+    ...batchRows.value.filter(r=>!batchFinished(r.status)).map(r=>r.job_id),
+    selected.value&&active(selected.value)?selected.value.job_id:undefined,
+  ].filter((id): id is string => Boolean(id)),
+})
 const filtered = computed(() => devices.value.filter(d => `${d.name} ${d.ip}`.toLowerCase().includes(search.value.toLowerCase())))
-const activeCount = computed(() => jobs.value.filter(active).length)
+const activeCount = computed(() => new Set([...devices.value.map(d=>d.active_job_id), ...recentJobs.value.filter(active).map(j=>j.job_id)].filter(Boolean)).size)
+const connectionLabel = computed(() => ({connecting:'正在连接实时更新',syncing:'正在同步状态',connected:'实时更新已连接',disconnected:'实时连接中断，正在重连',unsupported:'实时更新不可用，请手动刷新',blocked:'Gateway 存储异常',stale:'设备同步失败，请刷新',closed:'实时连接已关闭'}[realtimeStatus.value] || '正在连接'))
 const methodName = (s: string) => ({wol: 'WoL 魔术包', mac_vnc: 'Mac 屏幕共享', wol_mac_vnc: 'WoL + Mac VNC'}[s] || s)
 const statusName = (s: string) => ({pending:'等待执行',running:'正在执行',success:'已完成',partial:'部分完成',failed:'失败',timeout:'超时',cancelled:'已取消',expired:'已过期',interrupted:'结果不明',submitting:'正在提交',paused:'待继续'}[s] || s)
 const phaseName = (s: string) => ({queued:'排队中',starting:'准备执行',wol:'发送 Magic Packet',vnc:'准备 VNC',connecting:'等待 Mac 连接',authenticating:'验证 Mac 账户',authenticated:'认证成功',holding:'保持连接',probe:'检测 TCP 端口',finished:'执行结束'}[s] || s)
 const date = (s: string) => new Date(s).toLocaleString('zh-CN', {hour12:false})
-const latest = (id: string) => jobs.value.find(j => j.device_id === id)
-function observation(id: string) { const o = latest(id)?.observation; if(!o?.observed_at || Date.now()-Date.parse(o.observed_at)>60000) return '状态未知'; return o.state==='service_ready' ? 'VNC 已验证' : o.state==='reachable' ? '端口可达' : '状态未知' }
-function report(e: unknown) { error.value = e instanceof Error ? e.message : '请求失败' }
+const latest = (id: string) => recentJobs.value.find(j => j.device_id === id)
+function observation(id: string) { const o = latest(id)?.observation; if(!o?.observed_at || clock.value-Date.parse(o.observed_at)>=60000) return '状态未知'; return o.state==='service_ready' ? 'VNC 已验证' : o.state==='reachable' ? '端口可达' : '状态未知' }
+function report(e: unknown) { if((e as {status?:number})?.status===401&&authenticated.value)endSession(); error.value = e instanceof Error ? e.message : '请求失败' }
 async function guarded(fn: () => Promise<void>) { if(busy.value)return; busy.value=true;error.value='';notice.value='';try{await fn()}catch(e){report(e)}finally{busy.value=false} }
-async function loadDevices(){const data=await request('/devices');devices.value=data.devices;revision.value=data.revision;chosen.value=chosen.value.filter(id=>devices.value.some(d=>d.id===id))}
-async function loadJobs(append=false){const data=await request('/wake-jobs?limit=50'+(append&&historyCursor.value?'&after='+encodeURIComponent(historyCursor.value):''));jobs.value=append?[...jobs.value,...data.jobs]:data.jobs;historyCursor.value=data.next_cursor||'';if(selected.value)selected.value=await request('/wake-jobs/'+selected.value.job_id)}
-async function load(){const [g,iface,cfg]=await Promise.all([request('/gateway'),request('/network/interfaces'),request('/settings')]);gateway.value=g;interfaces.value=iface;settings.value=cfg;savedDeviceDefaults.value={...cfg.device_defaults};networks.value=cfg.allowed_networks.join('\n');await Promise.all([loadDevices(),loadJobs()])}
-async function boot(){try{const session=await request('/auth/session');initialized.value=session.initialized;authenticated.value=session.authenticated;setCSRF(session.csrf_token);if(authenticated.value){await load();schedule()}}catch(e){report(e)}finally{loading.value=false}}
-async function login(){await guarded(async()=>{if(!initialized.value){await request('/auth/setup',{method:'POST',body:JSON.stringify({token:setupToken.value,password:password.value})});initialized.value=true;setupToken.value=''}const data=await request('/auth/session',{method:'POST',body:JSON.stringify({password:password.value})});password.value='';setCSRF(data.csrf_token);authenticated.value=true;await load();schedule()})}
-async function logout(){await guarded(async()=>{await request('/auth/session',{method:'DELETE'});authenticated.value=false;setCSRF('');if(timer)clearTimeout(timer)})}
-function schedule(){if(timer)clearTimeout(timer);if(stopped||!authenticated.value)return;timer=setTimeout(poll,document.hidden?10000:Math.max(activeCount.value||batchRunning.value?1000:10000,1000*Math.min(30,2**failures)))}
-async function poll(){try{await loadJobs();await loadDevices();failures=0}catch(e){failures++;if((e as {status?:number}).status===401){authenticated.value=false;setCSRF('');report(e)}else if(failures===1)report(e)}finally{schedule()}}
+function endSession(){authenticated.value=false;sessionEpoch++;historyRequest++;realtime.stop();realtime.clear();setCSRF('');recentJobs.value=[];jobs.value=[];devices.value=[];selected.value=null;editing.value=null;chosen.value=[];batchRows.value=[];batchConfirming.value=false;historyCursor.value='';historyLoaded=false;historyDirty.value=false;cleanupPreview.value=null;historyLoading.value=false;deviceLoad=undefined;deviceDirty=false;page.value='devices';pendingKeys.clear();if(deviceTimer)clearTimeout(deviceTimer);if(clockTimer)clearTimeout(clockTimer)}
+function updateClock(){
+  if(clockTimer)clearTimeout(clockTimer)
+  clock.value=Date.now()
+  const expiries=recentJobs.value.map(j=>j.observation?.observed_at?Date.parse(j.observation.observed_at)+60000:0).filter(t=>t>clock.value)
+  if(expiries.length)clockTimer=setTimeout(updateClock,Math.max(1,Math.min(...expiries)-clock.value))
+}
+function applyJob(job: Job){
+  historyVersion++
+  recentJobs.value=realtime.values();updateClock()
+  const d=devices.value.find(d=>d.id===job.device_id)
+  if(d){if(active(job))d.active_job_id=job.job_id;else if(d.active_job_id===job.job_id)d.active_job_id=''}
+  if(selected.value?.job_id===job.job_id)selected.value=job
+  const index=jobs.value.findIndex(j=>j.job_id===job.job_id)
+  if(index>=0)jobs.value[index]=job
+  else if(historyLoaded)historyDirty.value=true
+  const row=batchRows.value.find(r=>r.job_id===job.job_id)
+  if(row){row.status=job.status;row.message=job.message||'任务正在执行'}
+}
+function missingJob(id: string){
+  historyRequest++;historyVersion++;historyLoading.value=false
+  jobs.value=jobs.value.filter(j=>j.job_id!==id)
+  if(selected.value?.job_id===id)selected.value=null
+  recentJobs.value=realtime.values();updateClock()
+  historyCursor.value='';if(historyLoaded)historyDirty.value=true
+}
+function historyCleared(plan: HistoryCleanup | null, ids: string[]){
+  historyRequest++;historyVersion++;historyLoading.value=false
+  jobs.value=jobs.value.filter(j=>!matchesHistoryCleanup(j,plan))
+  if(selected.value&&matchesHistoryCleanup(selected.value,plan))selected.value=null
+  for(const row of batchRows.value){if(row.job_id&&ids.includes(row.job_id)&&batchFinished(row.status))row.job_id=undefined}
+  recentJobs.value=realtime.values();updateClock()
+  historyCursor.value='';if(historyLoaded)historyDirty.value=true
+}
+async function previewCleanup(){await guarded(async()=>{
+  const session=sessionEpoch
+  const plan=await request('/wake-jobs/cleanup?scope='+cleanupScope.value)
+  if(session===sessionEpoch)cleanupPreview.value=plan
+})}
+async function confirmCleanup(){await guarded(async()=>{
+  const plan=cleanupPreview.value
+  if(!plan)return
+  const session=sessionEpoch
+  cleanupPreview.value=null
+  const result=await request('/wake-jobs/cleanup',{method:'POST',body:JSON.stringify({scope:plan.scope,before:plan.before})})
+  if(session!==sessionEpoch)return
+  realtime.clearHistory(result)
+  notice.value=`已清理 ${result.deleted} 条任务记录；执行中和保护期内的记录已保留。`
+})}
+async function loadDevices(target=0): Promise<void>{
+  if(!authenticated.value||stopped||target&&target<=revision.value)return
+  if(deviceTimer){clearTimeout(deviceTimer);deviceTimer=undefined}
+  deviceDirty=true
+  if(deviceLoad)return deviceLoad
+  const session=sessionEpoch
+  const pending=(async()=>{
+    while(deviceDirty&&authenticated.value&&!stopped&&session===sessionEpoch){
+      deviceDirty=false
+      const mark=realtime.checkpoint(), data=await request('/devices')
+      if(session!==sessionEpoch||!authenticated.value||stopped)return
+      if(mark.generation!==realtime.generation){deviceDirty=true;continue}
+      devices.value=realtime.overlayDevices(data.devices,mark);revision.value=data.revision
+      chosen.value=chosen.value.filter(id=>devices.value.some(d=>d.id===id))
+    }
+  })().finally(()=>{if(deviceLoad===pending)deviceLoad=undefined})
+  deviceLoad=pending
+  return pending
+}
+async function scheduleDevices(target: number){
+  if(target<=revision.value)return
+  if(deviceTimer)clearTimeout(deviceTimer)
+  deviceTimer=setTimeout(()=>{deviceTimer=undefined;loadDevices(target).catch(report)},60)
+}
+async function loadJobs(append=false){
+  if(page.value!=='history'||!authenticated.value)return
+  const current=++historyRequest, session=sessionEpoch, mark=realtime.checkpoint(), version=historyVersion
+  historyLoading.value=true
+  try{
+    const data=await request('/wake-jobs?limit=50'+(append&&historyCursor.value?'&after='+encodeURIComponent(historyCursor.value):''))
+    if(current!==historyRequest||session!==sessionEpoch||!authenticated.value)return
+    const incoming=data.jobs.map((j:Job)=>realtime.newer(j,mark))
+    jobs.value=append?[...jobs.value,...incoming.filter((j:Job)=>!jobs.value.some(old=>old.job_id===j.job_id))]:incoming
+    historyCursor.value=data.next_cursor||'';historyLoaded=true;if(!append)historyDirty.value=version!==historyVersion
+  }finally{if(current===historyRequest)historyLoading.value=false}
+}
+async function load(){
+  const session=sessionEpoch
+  const initialDevices=realtime.start().then(ready=>ready?undefined:loadDevices())
+  const [g,iface,cfg]=await Promise.all([request('/gateway'),request('/network/interfaces'),request('/settings'),initialDevices])
+  if(session!==sessionEpoch||!authenticated.value||stopped)return
+  gateway.value=g;interfaces.value=iface;settings.value=cfg;savedDeviceDefaults.value={...cfg.device_defaults};networks.value=cfg.allowed_networks.join('\n')
+}
+async function boot(){try{const session=await request('/auth/session');initialized.value=session.initialized;authenticated.value=session.authenticated;setCSRF(session.csrf_token);if(authenticated.value)await load()}catch(e){report(e)}finally{loading.value=false}}
+async function login(){await guarded(async()=>{if(!initialized.value){await request('/auth/setup',{method:'POST',body:JSON.stringify({token:setupToken.value,password:password.value})});initialized.value=true;setupToken.value=''}const data=await request('/auth/session',{method:'POST',body:JSON.stringify({password:password.value})});password.value='';page.value='devices';sessionEpoch++;setCSRF(data.csrf_token);authenticated.value=true;await load()})}
+async function logout(){await guarded(async()=>{await request('/auth/session',{method:'DELETE'});endSession()})}
+async function refreshStatus(){await guarded(async()=>{if(realtime.connected())await realtime.synchronize();else{await loadDevices();realtime.start()}})}
+watch(page,p=>{if(authenticated.value&&p==='history')loadJobs().catch(report)})
+function onVisibility(){if(!document.hidden&&authenticated.value&&realtime.connected())realtime.synchronize().catch(report)}
+async function openJob(id?:string){if(id)selected.value=await realtime.readJob(id)}
 function newDevice(){isNew.value=true;optionalOpen.value=false;vncPassword.value='';clearPassword.value=false;const defaults=savedDeviceDefaults.value;editing.value={id:'',name:'',type:'pc',enabled:true,revision:0,wake_method:'wol',ip:'',note:'',wol:{mac:'',broadcast:defaults.broadcast,interface:'',port:defaults.port,repeat:defaults.repeat,interval_ms:100},vnc:{port:5900,username:'',hold_seconds:0},probe:{enabled:false,port:22,timeout_seconds:60}}}
 function edit(d: Device){isNew.value=false;optionalOpen.value=Boolean(d.note||(d.wake_method==='wol'&&(d.ip||d.probe.enabled)));editing.value=JSON.parse(JSON.stringify(d));vncPassword.value='';clearPassword.value=false}
 function chooseInterface(){if(!editing.value)return;editing.value.wol.broadcast=broadcastOnSelection(interfaces.value,editing.value.wol.interface,editing.value.wol.broadcast)}
 async function saveDevice(){await guarded(async()=>{if(!editing.value)return;const d={...editing.value, id:isNew.value?undefined:editing.value.id, vnc_password:vncPassword.value||undefined, clear_vnc_password:clearPassword.value};await request('/devices'+(isNew.value?'':'/'+d.id),{method:isNew.value?'POST':'PUT',body:JSON.stringify(d)});editing.value=null;vncPassword.value='';await loadDevices();notice.value='设备已保存'})}
 async function remove(d: Device){if(!confirm(`删除“${d.name}”？历史任务会保留。`))return;await guarded(async()=>{await request('/devices/'+d.id,{method:'DELETE',headers:{'If-Match':String(d.revision)}});await loadDevices();notice.value='设备已删除'})}
-async function submit(d: Device,action='wake'){await guarded(async()=>{const target=d.id+':'+action;let key=pendingKeys.get(target);if(!key){key=commandKey();pendingKeys.set(target,key)}try{const job=await request('/devices/'+d.id+'/'+action,{method:'POST',headers:{'Idempotency-Key':key}});selected.value=job;pendingKeys.delete(target);await Promise.all([loadDevices(),loadJobs()])}catch(e){const detail=e as {jobID?:string;status?:number};if(detail.jobID){selected.value=await request('/wake-jobs/'+detail.jobID);pendingKeys.delete(target)}else{if(detail.status&&detail.status<500)pendingKeys.delete(target);throw e}}})}
-async function cancelJob(){await guarded(async()=>{if(!selected.value)return;await request('/wake-jobs/'+selected.value.job_id+'/cancel',{method:'POST'});await loadJobs()})}
+function showSubmission(job: Job, action: string, existing=false){
+  if(action==='wake')notice.value=existing?'已有相关任务正在处理，可在设备卡片查看进度和详情。':'已提交唤醒任务，可在设备卡片查看进度和结果。'
+  else selected.value=job
+}
+async function submit(d: Device,action='wake'){
+  await guarded(async()=>{
+    const target=d.id+':'+action
+    let key=pendingKeys.get(target)
+    if(!key){key=commandKey();pendingKeys.set(target,key)}
+    const session=sessionEpoch
+    try{
+      const job=await realtime.submit(d.id,key,action)
+      if(session!==sessionEpoch)return
+      showSubmission(job,action);pendingKeys.delete(target)
+    }catch(e){
+      const detail=e as {jobID?:string;status?:number}
+      if(detail.jobID){
+        const job=await realtime.readJob(detail.jobID)
+        if(session!==sessionEpoch)return
+        showSubmission(job,action,true);pendingKeys.delete(target)
+      }else{
+        if(detail.status&&detail.status<500)pendingKeys.delete(target)
+        throw e
+      }
+    }
+  })
+}
+async function cancelJob(){await guarded(async()=>{if(!selected.value)return;await request('/wake-jobs/'+selected.value.job_id+'/cancel',{method:'POST'});await openJob(selected.value.job_id)})}
 async function clearGuard(d:Device){if(!confirm('请先确认 Mac 账户和密码正确。解除认证保护后，下一次唤醒将允许再次认证。'))return;await guarded(async()=>{await request('/devices/'+d.id+'/authentication/reset',{method:'POST'});notice.value='认证保护已解除'})}
-async function saveSettings(){await guarded(async()=>{if(!settings.value)return;const cfg={...settings.value,allowed_networks:networks.value.split('\n').map(s=>s.trim()).filter(Boolean)};await request('/settings',{method:'PUT',body:JSON.stringify(cfg)});savedDeviceDefaults.value={...cfg.device_defaults};notice.value='设置已保存；新设备默认参数立即生效，监听地址和资源限制等变更需重启服务'})}
+async function saveSettings(){await guarded(async()=>{if(!settings.value)return;const cfg={...settings.value,allowed_networks:networks.value.split('\n').map(s=>s.trim()).filter(Boolean)};const result=await request('/settings',{method:'PUT',body:JSON.stringify(cfg)});savedDeviceDefaults.value={...cfg.device_defaults};notice.value=result.restart_required?'设置已保存；默认参数和记录上限立即生效，监听地址、并发限制或保留天数等变更需重启服务。':'设置已保存并生效。'})}
 async function exportDevices(){await guarded(async()=>{const data=await request('/devices/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='remotewake-devices.json';a.click();URL.revokeObjectURL(url)})}
 async function importDevices(commit=false){await guarded(async()=>{const data=JSON.parse(importText.value);await request('/devices/import',{method:'POST',body:JSON.stringify({devices:data.devices||data,revision:revision.value,commit})});importPreview.value=!commit;if(commit){importText.value='';await loadDevices();notice.value='设备已导入；Mac 密码需要单独配置'}else notice.value='校验通过，确认后将新增设备'})}
 function toggleAll(){if(allChosen.value){const visible=new Set(selectable.value.map(d=>d.id));chosen.value=chosen.value.filter(id=>!visible.has(id))}else chosen.value=[...new Set([...chosen.value,...selectable.value.map(d=>d.id)])].slice(0,50)}
 async function continueBatch(){
   if(batchRunning.value||busy.value)return
-  resetBatchPanel();batchRunning.value=true;batchStop.value=false;error.value='';batchMessage.value='';schedule()
+  if(!realtime.connected()){error.value='请等待实时连接恢复，或点击刷新状态后再继续';return}
+  resetBatchPanel();batchRunning.value=true;batchStop.value=false;error.value='';batchMessage.value=''
   try {
     const result=await runBatch(batchRows.value,{
-      submit:(id:string,key:string)=>request('/devices/'+id+'/wake',{method:'POST',headers:{'Idempotency-Key':key}}),
-      getJob:(id:string)=>request('/wake-jobs/'+id),
-      shouldStop:()=>batchStop.value||stopped||!authenticated.value,
+      submit:(id:string,key:string)=>realtime.submit(id,key),
+      getJob:(id:string)=>realtime.readJob(id),
+      waitForJob:realtime.waitForJob,
+      shouldStop:()=>batchStop.value||stopped||!authenticated.value||!realtime.connected(),
       onUpdate:(row:BatchRow)=>{if(batchFinished(row.status)&&pendingKeys.get(row.device_id+':wake')===row.command_id)pendingKeys.delete(row.device_id+':wake')},
     })
     batchMessage.value=result.message||(result.paused?'批次已暂停，请继续确认已有任务结果。':'本批次已处理完成，请查看各设备结果。')
-    if(authenticated.value)await Promise.all([loadDevices(),loadJobs()])
-  }catch(e){report(e)}finally{batchRunning.value=false;schedule()}
+  }catch(e){report(e)}finally{batchRunning.value=false}
 }
 async function startBatch(){
   if(batchRunning.value||batchPending.value||!chosen.value.length)return
@@ -85,7 +226,7 @@ async function startBatch(){
   await continueBatch()
 }
 function batchRowStatus(row:BatchRow){return row.status==='pending'&&!row.job_id?'未提交':statusName(row.status)}
-onMounted(boot);onUnmounted(()=>{stopped=true;if(timer)clearTimeout(timer);document.body.classList.remove('modal-open')})
+onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()});onUnmounted(()=>{stopped=true;realtime.stop();if(deviceTimer)clearTimeout(deviceTimer);if(clockTimer)clearTimeout(clockTimer);document.removeEventListener('visibilitychange',onVisibility);document.body.classList.remove('modal-open')})
 </script>
 
 <template>
@@ -96,7 +237,7 @@ onMounted(boot);onUnmounted(()=>{stopped=true;if(timer)clearTimeout(timer);docum
   </main>
   <div v-else class="shell">
     <aside class="sidebar"><a class="brand" href="#" @click.prevent="page='devices'"><div class="brand-mark small">R<span>↗</span></div><div>RemoteWake<small>GATEWAY</small></div></a><div class="sidebar-label">工作空间</div><nav><button :class="{chosen:page==='devices'}" @click="page='devices'">▦ <span>设备管理</span><b>{{ devices.length }}</b></button><button :class="{chosen:page==='history'}" @click="page='history'">◷ <span>唤醒记录</span></button><button :class="{chosen:page==='settings'}" @click="page='settings'">⚙ <span>系统设置</span></button></nav><div class="sidebar-bottom"><div class="gateway-status"><i></i><div>{{ gateway.name }}<small>{{ gateway.version }}</small></div></div><button class="logout" @click="logout">退出登录 ↗</button></div></aside>
-    <div class="workspace"><header class="topbar"><span>家庭网络 <span class="slash">/</span> {{ page==='devices'?'设备管理':page==='history'?'唤醒记录':'系统设置' }}</span><span class="connection"><i></i> Gateway 已连接</span></header>
+    <div class="workspace"><header class="topbar"><span>家庭网络 <span class="slash">/</span> {{ page==='devices'?'设备管理':page==='history'?'唤醒记录':'系统设置' }}</span><span class="connection" :class="{degraded:realtimeStatus!=='connected'}"><i></i><span :title="connectionLabel">{{ connectionLabel }}</span><button class="text-button" :disabled="busy" @click="refreshStatus">刷新状态</button></span></header>
       <div class="content"><div v-if="error" class="alert error" role="alert">{{ error }}<button @click="error=''">×</button></div><div v-if="notice" class="alert success" role="status">{{ notice }}<button @click="notice=''">×</button></div>
       <template v-if="page==='devices'"><div class="page-heading"><div><span class="eyebrow">YOUR CONNECTED HOME</span><h1>设备管理<span class="count">{{ devices.length }}</span></h1><p class="muted">管理你的设备，随时发起远程唤醒。</p></div><button class="primary" @click="newDevice">＋ 添加设备</button></div>
         <div class="stats"><div><span>已管理设备</span><strong>{{ devices.length.toString().padStart(2,'0') }}</strong><small>家庭网络中的设备</small></div><div><span>正在执行</span><strong>{{ activeCount.toString().padStart(2,'0') }}<i class="stat-dot"></i></strong><small>唤醒与检测任务</small></div><div><span>唤醒方式</span><strong>03</strong><small>WoL · Mac VNC · 组合唤醒</small></div></div>
@@ -116,18 +257,18 @@ onMounted(boot);onUnmounted(()=>{stopped=true;if(timer)clearTimeout(timer);docum
           <div v-show="!batchCollapsed" id="batch-result-details" class="batch-details">
             <p class="muted">逐台执行，沿用已有任务保护。连接中断后使用“继续未完成”确认结果。全部成功后 5 秒自动收起，任务记录可在“唤醒记录”查看。</p>
             <p v-if="batchMessage" role="status">{{ batchMessage }}</p>
-            <div class="batch-results"><div v-for="row in batchRows" :key="row.command_id" class="batch-result"><strong>{{ row.name }}</strong><span class="badge" :class="row.status">{{ batchRowStatus(row) }}</span><p>{{ row.message }}</p><button v-if="row.job_id" class="text-button" @click="guarded(async()=>{selected=await request('/wake-jobs/'+row.job_id)})">详情 →</button></div></div>
+            <div class="batch-results"><div v-for="row in batchRows" :key="row.command_id" class="batch-result"><strong>{{ row.name }}</strong><span class="badge" :class="row.status">{{ batchRowStatus(row) }}</span><p>{{ row.message }}</p><button v-if="row.job_id" class="text-button" @click="guarded(async()=>{await openJob(row.job_id)})">详情 →</button></div></div>
           </div>
         </section>
         <div v-if="!devices.length" class="empty"><div class="empty-icon">⌘</div><h2>连接你的第一台设备</h2><p>添加 PC、Mac 或 NAS，开始使用远程唤醒。</p><button class="primary" @click="newDevice">＋ 添加设备</button></div>
-        <div v-else class="device-grid"><article v-for="d in filtered" :key="d.id" class="device-card"><div class="device-top"><label class="device-select"><input v-model="chosen" type="checkbox" :value="d.id" :aria-label="'选择 '+d.name" :disabled="batchRunning||!canWake(d)||(chosen.length>=50&&!chosen.includes(d.id))"></label><div class="device-icon" :class="d.type">{{ d.type==='mac'?'⌘':d.type==='nas'?'▤':'▣' }}</div><span class="badge" :class="d.active_job_id?'running':''">{{ d.active_job_id?'任务进行中':!d.enabled?'已禁用':observation(d.id) }}</span></div><h3>{{ d.name }}</h3><dl><div><dt>目标 IP</dt><dd>{{ d.ip||'未配置' }}</dd></div><div><dt>唤醒方式</dt><dd>{{ methodName(d.wake_method) }}</dd></div><div><dt>{{ d.wake_method==='mac_vnc'?'VNC 账户':'MAC 地址' }}</dt><dd>{{ d.wake_method==='mac_vnc'?d.vnc.username:d.wol.mac }}</dd></div></dl><div v-if="d.wake_method!=='wol'&&!d.password_configured" class="credential-hint">请先编辑设备，配置 Mac 密码</div><div class="device-actions"><button class="wake-button" :disabled="busy||batchRunning||!d.enabled||!!d.active_job_id" @click="submit(d)">{{ d.active_job_id?'◌ 执行中':'ϟ 唤醒设备' }}</button><button class="icon-button" title="TCP 检测" :disabled="busy||batchRunning||!!d.active_job_id" @click="submit(d,'probe')">⌁</button><button class="icon-button" title="编辑设备" :disabled="batchRunning||!!d.active_job_id" @click="edit(d)">✎</button></div><button v-if="d.active_job_id" class="text-button" @click="guarded(async()=>{selected=await request('/wake-jobs/'+d.active_job_id)})">查看任务进度 →</button><div v-else-if="latest(d.id)" class="last-operation"><span :class="'status-'+latest(d.id)?.status">{{ statusName(latest(d.id)!.status) }}</span><time>{{ date(latest(d.id)!.created_at) }}</time></div></article></div>
+        <div v-else class="device-grid"><article v-for="d in filtered" :key="d.id" class="device-card"><div class="device-top"><label class="device-select"><input v-model="chosen" type="checkbox" :value="d.id" :aria-label="'选择 '+d.name" :disabled="batchRunning||!canWake(d)||(chosen.length>=50&&!chosen.includes(d.id))"></label><div class="device-icon" :class="d.type">{{ d.type==='mac'?'⌘':d.type==='nas'?'▤':'▣' }}</div><span class="badge" :class="d.active_job_id?'running':''">{{ d.active_job_id?'任务进行中':!d.enabled?'已禁用':observation(d.id) }}</span></div><h3>{{ d.name }}</h3><dl><div><dt>目标 IP</dt><dd>{{ d.ip||'未配置' }}</dd></div><div><dt>唤醒方式</dt><dd>{{ methodName(d.wake_method) }}</dd></div><div><dt>{{ d.wake_method==='mac_vnc'?'VNC 账户':'MAC 地址' }}</dt><dd>{{ d.wake_method==='mac_vnc'?d.vnc.username:d.wol.mac }}</dd></div></dl><div v-if="d.wake_method!=='wol'&&!d.password_configured" class="credential-hint">请先编辑设备，配置 Mac 密码</div><div class="device-actions"><button class="wake-button" :disabled="busy||batchRunning||!d.enabled||!!d.active_job_id" @click="submit(d)">{{ d.active_job_id?'◌ 执行中':'ϟ 唤醒设备' }}</button><button class="icon-button" title="TCP 检测" :disabled="busy||batchRunning||!!d.active_job_id" @click="submit(d,'probe')">⌁</button><button class="icon-button" title="编辑设备" :disabled="batchRunning||!!d.active_job_id" @click="edit(d)">✎</button></div><button v-if="d.active_job_id" class="text-button" @click="guarded(async()=>{await openJob(d.active_job_id)})">查看任务进度 →</button><div v-else-if="latest(d.id)" class="last-operation"><span :class="'status-'+latest(d.id)?.status">{{ statusName(latest(d.id)!.status) }}</span><time>{{ date(latest(d.id)!.created_at) }}</time><button class="text-button" @click="guarded(()=>openJob(latest(d.id)?.job_id))">查看详情 →</button></div></article></div>
         <p class="footnote">ⓘ 唤醒包已发送或 VNC 认证成功不代表物理屏幕已亮；端口状态在检测后 60 秒内有效。</p>
       </template>
-      <template v-else-if="page==='history'"><div class="page-heading"><div><span class="eyebrow">ACTIVITY</span><h1>唤醒记录</h1><p class="muted">追踪每次任务的执行步骤和结果。</p></div><button class="secondary" @click="guarded(()=>loadJobs())">刷新记录</button></div><div class="table-wrap"><table><thead><tr><th>设备</th><th>操作</th><th>创建时间</th><th>结果</th><th></th></tr></thead><tbody><tr v-for="j in jobs" :key="j.job_id"><td>{{ devices.find(d=>d.id===j.device_id)?.name||j.device_id }}<small>{{ j.command_id }}</small></td><td>{{ j.action==='probe'?'TCP 检测':'远程唤醒' }}</td><td>{{ date(j.created_at) }}</td><td><span class="badge" :class="j.status">{{ statusName(j.status) }}</span></td><td><button class="text-button" @click="selected=j">查看详情 →</button></td></tr><tr v-if="!jobs.length"><td colspan="5" class="muted">暂无任务记录</td></tr></tbody></table></div><button v-if="historyCursor" class="secondary load-more" @click="guarded(()=>loadJobs(true))">加载更多</button></template>
-      <template v-else-if="settings"><div class="page-heading"><div><span class="eyebrow">PREFERENCES</span><h1>系统设置</h1><p class="muted">管理 Gateway 配置和公开设备备份。</p></div></div><form class="settings-panel" @submit.prevent="saveSettings"><h2>Gateway 配置</h2><div class="form-grid"><label>Gateway 名称<input v-model="settings.name" required maxlength="100"></label><label>监听地址<input v-model="settings.listen" required placeholder="127.0.0.1:9000"></label><label class="wide">公开访问地址<input v-model="settings.public_url" placeholder="https://wake.example.com（可选）"><small>使用 HTTPS 反向代理时设置；变更后需重启并重新登录。</small></label><label class="wide">允许访问的目标网段<textarea v-model="networks" rows="3" required></textarea><small>每行一个 CIDR，仅允许向这些网段的设备发送请求。</small></label><label>最大并发任务<input v-model.number="settings.max_concurrent" type="number" min="1" max="16" required></label><label>最大 VNC 并发<input v-model.number="settings.max_vnc" type="number" min="1" :max="settings.max_concurrent" required></label><label>等待队列容量<input v-model.number="settings.queue_size" type="number" min="1" max="128" required></label><label>任务保留天数<input v-model.number="settings.retention_days" type="number" min="1" max="90" required></label></div><fieldset class="default-settings"><legend>新设备默认参数</legend><p class="muted">仅用于之后添加的设备，保存后立即生效，不覆盖已有设备。</p><div class="form-grid"><label class="wide">默认广播地址<input v-model="settings.device_defaults.broadcast" required placeholder="255.255.255.255"></label><label>默认 UDP 端口<input v-model.number="settings.device_defaults.port" type="number" min="1" max="65535" required></label><label>默认发送次数<input v-model.number="settings.device_defaults.repeat" type="number" min="1" max="10" required></label></div></fieldset><button class="primary" :disabled="busy">保存设置</button></form><section class="settings-panel"><h2>设备导入与导出</h2><p class="muted">仅包含公开配置，不含管理员密码或 VNC 密码。导入只新增设备，重复 ID 会被拒绝。</p><button class="secondary" @click="exportDevices">↓ 导出设备 JSON</button><label>导入 JSON<textarea v-model="importText" rows="6" placeholder="粘贴导出的设备 JSON" @input="importPreview=false"></textarea></label><div class="button-row"><button class="secondary" :disabled="busy||!importText" @click="importDevices(false)">检查导入</button><button v-if="importPreview" class="primary" :disabled="busy" @click="importDevices(true)">确认新增设备</button></div></section></template>
+      <template v-else-if="page==='history'"><div class="page-heading"><div><span class="eyebrow">ACTIVITY</span><h1>唤醒记录</h1><p class="muted">追踪每次任务的执行步骤和结果。</p></div><button class="secondary" :disabled="busy||historyLoading" @click="guarded(()=>loadJobs())">{{ historyLoading?'正在加载…':'刷新记录' }}</button></div><p v-if="historyDirty" class="history-update" role="status">记录有变化，可点击“刷新记录”查看。</p><div class="table-wrap"><table><thead><tr><th>设备</th><th>操作</th><th>创建时间</th><th>结果</th><th></th></tr></thead><tbody><tr v-for="j in jobs" :key="j.job_id"><td>{{ devices.find(d=>d.id===j.device_id)?.name||j.device_id }}<small>{{ j.command_id }}</small></td><td>{{ j.action==='probe'?'TCP 检测':'远程唤醒' }}</td><td>{{ date(j.created_at) }}</td><td><span class="badge" :class="j.status">{{ statusName(j.status) }}</span></td><td><button class="text-button" @click="guarded(()=>openJob(j.job_id))">查看详情 →</button></td></tr><tr v-if="!jobs.length"><td colspan="5" class="muted">暂无任务记录</td></tr></tbody></table></div><button v-if="historyCursor" class="secondary load-more" :disabled="busy||historyLoading" @click="guarded(()=>loadJobs(true))">加载更多</button></template>
+      <template v-else-if="settings"><div class="page-heading"><div><span class="eyebrow">PREFERENCES</span><h1>系统设置</h1><p class="muted">管理 Gateway 配置和公开设备备份。</p></div></div><form class="settings-panel" @submit.prevent="saveSettings"><h2>Gateway 配置</h2><div class="form-grid"><label>Gateway 名称<input v-model="settings.name" required maxlength="100"></label><label>监听地址<input v-model="settings.listen" required placeholder="127.0.0.1:9000"></label><label class="wide">公开访问地址<input v-model="settings.public_url" placeholder="https://wake.example.com（可选）"><small>使用 HTTPS 反向代理时设置；变更后需重启并重新登录。</small></label><label class="wide">允许访问的目标网段<textarea v-model="networks" rows="3" required></textarea><small>每行一个 CIDR，仅允许向这些网段的设备发送请求。</small></label><label>最大并发任务<input v-model.number="settings.max_concurrent" type="number" min="1" max="16" required></label><label>最大 VNC 并发<input v-model.number="settings.max_vnc" type="number" min="1" :max="settings.max_concurrent" required></label><label>等待队列容量<input v-model.number="settings.queue_size" type="number" min="1" max="128" required></label><label>任务保留天数<input v-model.number="settings.retention_days" type="number" min="1" max="90" required><small>过期记录在启动及接受新任务前清理，修改后重启生效。</small></label><label>最大任务记录数<input v-model.number="settings.max_jobs" type="number" min="100" max="100000" required><small>保存后立即生效，不能小于现有记录数；达到上限且无过期记录可清理时暂停接受新任务。</small></label></div><fieldset class="default-settings"><legend>新设备默认参数</legend><p class="muted">仅用于之后添加的设备，保存后立即生效，不覆盖已有设备。</p><div class="form-grid"><label class="wide">默认广播地址<input v-model="settings.device_defaults.broadcast" required placeholder="255.255.255.255"></label><label>默认 UDP 端口<input v-model.number="settings.device_defaults.port" type="number" min="1" max="65535" required></label><label>默认发送次数<input v-model.number="settings.device_defaults.repeat" type="number" min="1" max="10" required></label></div></fieldset><button class="primary" :disabled="busy">保存设置</button></form><section class="settings-panel history-cleanup"><h2>手动清理任务记录</h2><p class="muted">删除对应的历史任务文件并释放存储空间。执行中、排队中及防重复执行保护期内的记录会保留；保护期至命令过期后 1 分钟结束。</p><label>清理范围<select v-model="cleanupScope" :disabled="busy" @change="cleanupPreview=null"><option value="expired">仅清理过期记录</option><option value="completed">清理全部已结束记录</option></select></label><p class="muted">过期范围按当前已生效的保留天数计算，未保存或待重启的设置不参与本次清理。</p><button class="secondary" :disabled="busy||batchRunning" @click="previewCleanup">预览清理</button><div v-if="cleanupPreview" class="cleanup-confirm" role="region" aria-label="确认清理任务记录"><strong>将永久删除 {{ cleanupPreview.eligible }} 条{{ cleanupPreview.scope==='expired'?'过期':'已结束' }}记录</strong><p>保留活动任务 {{ cleanupPreview.active }} 条、保护期内记录 {{ cleanupPreview.protected }} 条。{{ cleanupPreview.scope==='expired'?'当前保留天数为 '+cleanupPreview.retention_days+' 天。':'' }}</p><p>删除后无法恢复，并会移除对应的命令去重记录，请勿重新提交这些旧请求。设备配置、密码和认证保护不受影响。</p><div class="button-row"><button class="secondary" :disabled="busy" @click="cleanupPreview=null">取消清理</button><button class="secondary danger" :disabled="busy||!cleanupPreview.eligible" @click="confirmCleanup">确认删除 {{ cleanupPreview.eligible }} 条记录</button></div></div></section><section class="settings-panel"><h2>设备导入与导出</h2><p class="muted">仅包含公开配置，不含管理员密码或 VNC 密码。导入只新增设备，重复 ID 会被拒绝。</p><button class="secondary" @click="exportDevices">↓ 导出设备 JSON</button><label>导入 JSON<textarea v-model="importText" rows="6" placeholder="粘贴导出的设备 JSON" @input="importPreview=false"></textarea></label><div class="button-row"><button class="secondary" :disabled="busy||!importText" @click="importDevices(false)">检查导入</button><button v-if="importPreview" class="primary" :disabled="busy" @click="importDevices(true)">确认新增设备</button></div></section></template>
       </div><footer>RemoteWake Gateway <span>本地管理 · 数据保存在你的 Gateway</span></footer>
     </div>
-    <div v-if="editing" class="modal-backdrop device-backdrop" @click.self="!busy&&(editing=null)" @keydown.esc.stop="!busy&&(editing=null)">
+    <div v-if="editing" class="modal-backdrop device-backdrop">
       <section class="modal device-modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
         <header class="device-modal-header">
           <div><span class="eyebrow">DEVICE CONFIGURATION</span><h2 id="edit-title">{{ isNew?'添加设备':'编辑设备' }}</h2></div>

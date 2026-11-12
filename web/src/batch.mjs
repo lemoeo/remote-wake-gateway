@@ -1,10 +1,9 @@
 const active = job => ['pending', 'running'].includes(job.status)
 const finished = new Set(['success', 'partial', 'failed', 'timeout', 'cancelled', 'expired', 'interrupted'])
-const defaultPause = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 // Submit one device at a time and await its existing WakeJob. No separate wake
 // engine, unlimited queue or automatic retry of an uncertain command is used.
-export async function runBatch(rows, { submit, getJob, shouldStop = () => false, onUpdate = (_row) => {}, pause = defaultPause }) {
+export async function runBatch(rows, { submit, getJob, waitForJob, shouldStop = () => false, onUpdate = (_row) => {} }) {
   for (const row of rows) {
     if (finished.has(row.status)) continue
     if (shouldStop()) break
@@ -26,14 +25,14 @@ export async function runBatch(rows, { submit, getJob, shouldStop = () => false,
       }
       if (job.device_id !== row.device_id) throw new Error('任务与所选设备不一致')
       row.job_id = job.job_id
-      for (;;) {
+      const update = job => {
+        if (job.device_id !== row.device_id) throw new Error('任务与所选设备不一致')
         row.status = job.status
         row.message = job.message || (active(job) ? '任务正在后台执行' : '执行结束')
         onUpdate(row)
-        if (!active(job)) break
-        await pause(1000)
-        job = await getJob(row.job_id)
       }
+      update(job)
+      if (active(job)) update(await waitForJob(job, update))
     } catch (error) {
       const uncertain = !error.status || error.status >= 500
       const blocked = uncertain || [401, 403, 429].includes(error.status)

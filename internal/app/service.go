@@ -36,25 +36,27 @@ type task struct {
 	cancel context.CancelFunc
 }
 type Service struct {
-	mu         sync.Mutex
-	fs         *storage.Store
-	cfg        model.Config
-	desired    model.Config
-	creds      *credentials.Store
-	devices    model.DeviceFile
-	jobs       map[string]*model.Job
-	commands   map[string]string
-	active     map[string]string
-	targets    map[string]string
-	cancels    map[string]context.CancelFunc
-	policy     Policy
-	queue      chan task
-	vncSlots   chan struct{}
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	closed     bool
-	storageErr error
+	mu           sync.Mutex
+	fs           *storage.Store
+	cfg          model.Config
+	desired      model.Config
+	creds        *credentials.Store
+	devices      model.DeviceFile
+	jobs         map[string]*model.Job
+	commands     map[string]string
+	active       map[string]string
+	targets      map[string]string
+	cancels      map[string]context.CancelFunc
+	policy       Policy
+	queue        chan task
+	vncSlots     chan struct{}
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	closed       bool
+	storageErr   error
+	subscribers  map[chan Event]struct{}
+	eventsClosed bool
 	// Network adapters are replaceable in tests and independent of HTTP/MQTT.
 	SendWoL func(context.Context, model.WoL) error
 	VNC     func(context.Context, macvnc.Options) (macvnc.Evidence, error)
@@ -202,6 +204,7 @@ func (s *Service) Close() {
 		return
 	}
 	s.closed = true
+	s.closeStreamsLocked()
 	s.cancel()
 	for _, c := range s.cancels {
 		c()
@@ -212,7 +215,7 @@ func (s *Service) Close() {
 }
 func (s *Service) write(name string, v any) error {
 	if e := s.fs.Write(name, v); e != nil {
-		s.storageErr = e
+		s.storageFailedLocked(e)
 		slog.Error("持久化失败，暂停写入和新任务", "file", name)
 		return model.Error(503, "storage_unavailable", "存储不可用，请检查磁盘后重启")
 	}
@@ -302,13 +305,13 @@ func (s *Service) SaveDevice(d model.Device, password *string, clearPassword boo
 	}
 	if password != nil {
 		if e := s.creds.Set(d, *password); e != nil {
-			s.storageErr = e
+			s.storageFailedLocked(e)
 			return d, model.Error(503, "credentials_write_failed", "无法保存密码")
 		}
 	}
 	if clearPassword {
 		if e := s.creds.Delete(d.ID); e != nil {
-			s.storageErr = e
+			s.storageFailedLocked(e)
 			return d, model.Error(503, "credentials_write_failed", "无法清除密码")
 		}
 	}
@@ -332,6 +335,7 @@ func (s *Service) SaveDevice(d model.Device, password *string, clearPassword boo
 	}
 	s.devices = next
 	d.PasswordConfigured = s.creds.Has(d)
+	s.devicesEventLocked()
 	return d, nil
 }
 func (s *Service) DeleteDevice(id string, revision int) error {
@@ -363,9 +367,11 @@ func (s *Service) DeleteDevice(id string, revision int) error {
 	}
 	s.devices = next
 	if e := s.creds.Delete(id); e != nil {
-		s.storageErr = e
+		s.devicesEventLocked()
+		s.storageFailedLocked(e)
 		return model.Error(503, "credentials_write_failed", "设备已删除，凭据清理失败，请检查存储")
 	}
+	s.devicesEventLocked()
 	return nil
 }
 
@@ -410,6 +416,7 @@ func (s *Service) Import(devices []model.Device, revision int, commit bool) erro
 		return e
 	}
 	s.devices = next
+	s.devicesEventLocked()
 	return nil
 }
 func (s *Service) SetCredential(id string, password *string, revision int) error { // Reuses revision, busy and binding checks.
@@ -441,6 +448,9 @@ func (s *Service) UpdateSettings(c model.Config) error {
 	if len(s.active) > 0 {
 		return model.Error(409, "device_busy", "有活动任务时不能修改设置")
 	}
+	if c.MaxJobs < len(s.jobs) {
+		return model.Error(422, "job_limit_below_usage", fmt.Sprintf("当前有 %d 条任务记录，请先清理，或将上限设置为不小于当前数量", len(s.jobs)))
+	}
 	for _, d := range s.devices.Devices {
 		if e := d.Validate(c); e != nil {
 			return model.Error(422, "invalid_settings", "新的网段设置不允许现有设备")
@@ -454,6 +464,7 @@ func (s *Service) UpdateSettings(c model.Config) error {
 	s.cfg.Name = c.Name
 	s.cfg.AllowedNetworks = c.AllowedNetworks
 	s.cfg.DeviceDefaults = c.DeviceDefaults
+	s.cfg.MaxJobs = c.MaxJobs
 	return nil
 }
 func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, error) {
@@ -545,6 +556,7 @@ func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, err
 	taskCtx, cancel := context.WithCancel(s.ctx)
 	s.cancels[j.ID] = cancel
 	s.queue <- task{id: j.ID, device: d, ctx: taskCtx, cancel: cancel}
+	s.jobEventLocked(&j)
 	return j.Clone(), nil
 }
 func (s *Service) Get(id string) (model.Job, error) {
@@ -599,7 +611,7 @@ func (s *Service) cleanupLocked() error {
 	for id, j := range s.jobs {
 		if !j.Active() && j.FinishedAt.Before(cutoff) && j.ExpiresAt.Before(time.Now().Add(-time.Minute)) {
 			if e := os.Remove(s.fs.Path(filepath.Join("jobs", id+".json"))); e != nil && !errors.Is(e, os.ErrNotExist) {
-				s.storageErr = e
+				s.storageFailedLocked(e)
 				return model.Error(503, "storage_unavailable", "无法清理过期记录")
 			}
 			delete(s.commands, j.CommandID)
@@ -650,6 +662,7 @@ func (s *Service) run(t task) {
 		return
 	}
 	action := j.Action
+	s.jobEventLocked(j)
 	s.mu.Unlock()
 	budget := 30 * time.Second
 	if action == "probe" {
@@ -786,11 +799,17 @@ func (s *Service) runVNC(ctx context.Context, t task, deadline time.Time) error 
 	}
 	return e
 }
-func (s *Service) phase(id, p string) { s.mu.Lock(); defer s.mu.Unlock(); s.jobs[id].Phase = p }
+func (s *Service) phase(id, p string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs[id].Phase = p
+	s.jobEventLocked(s.jobs[id])
+}
 func (s *Service) observe(id, state, kind string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.jobs[id].Observation = model.Observation{State: state, ProbeType: kind, ObservedAt: time.Now().UTC()}
+	s.jobEventLocked(s.jobs[id])
 }
 func (s *Service) stepStart(id, name string) {
 	s.mu.Lock()
@@ -798,11 +817,13 @@ func (s *Service) stepStart(id, name string) {
 	j := s.jobs[id]
 	j.Phase = name
 	j.Steps = append(j.Steps, model.Step{Name: name, Status: "running", StartedAt: time.Now().UTC()})
+	s.jobEventLocked(j)
 }
 func (s *Service) stepEnd(id, name string, e error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[id]
+	defer s.jobEventLocked(j)
 	step := &j.Steps[len(j.Steps)-1]
 	step.FinishedAt = time.Now().UTC()
 	step.Status = "success"
@@ -849,6 +870,7 @@ func (s *Service) finish(t task, status, code, msg string) {
 		j.Status = "running"
 		j.Code = "storage_unavailable"
 		j.Message = "结果无法保存，设备已锁定，请检查存储后重启"
+		s.jobEventLocked(j)
 		return
 	}
 	delete(s.active, t.device.ID)
@@ -856,4 +878,5 @@ func (s *Service) finish(t task, status, code, msg string) {
 		delete(s.targets, t.device.TargetKey())
 	}
 	delete(s.cancels, t.id)
+	s.jobEventLocked(j)
 }

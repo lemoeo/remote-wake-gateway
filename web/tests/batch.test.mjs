@@ -10,10 +10,9 @@ test('batch waits for each WakeJob and keeps partial results', async () => {
   const data=rows(), calls=[]
   await runBatch(data, {
     submit:async id=>{calls.push('submit:'+id);return {device_id:id,job_id:'job_'+id,status:'running'}},
-    getJob:async id=>{calls.push('get:'+id);return {device_id:id.slice(4),job_id:id,status:id==='job_pc'?'success':'partial'}},
-    pause:async()=>{},
+    waitForJob:async job=>{calls.push('event:'+job.job_id);return {...job,status:job.device_id==='pc'?'success':'partial'}},
   })
-  assert.deepEqual(calls,['submit:pc','get:job_pc','submit:mac','get:job_mac'])
+  assert.deepEqual(calls,['submit:pc','event:job_pc','submit:mac','event:job_mac'])
   assert.deepEqual(data.map(r=>r.status),['success','partial'])
 })
 test('uncertain submit pauses and explicit continuation reuses the same command key', async () => {
@@ -27,7 +26,7 @@ test('uncertain submit pauses and explicit continuation reuses the same command 
 })
 test('explicit stop lets current task finish and leaves remaining devices unsubmitted', async () => {
   const data=rows();let stopped=false;let submits=0
-  await runBatch(data,{submit:async id=>{submits++;stopped=true;return {device_id:id,job_id:'job_'+id,status:'running'}},getJob:async id=>({device_id:'pc',job_id:id,status:'success'}),shouldStop:()=>stopped,pause:async()=>{}})
+  await runBatch(data,{submit:async id=>{submits++;stopped=true;return {device_id:id,job_id:'job_'+id,status:'running'}},waitForJob:async job=>({...job,status:'success'}),shouldStop:()=>stopped})
   assert.equal(submits,1);assert.equal(data[0].status,'success');assert.equal(data[1].status,'pending')
 })
 test('same-device busy response reuses the job but another device target lock is preserved', async () => {
