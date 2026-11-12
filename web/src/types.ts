@@ -4,7 +4,9 @@ export interface Device {
   vnc: {port: number; username: string; hold_seconds: number}; probe: {enabled: boolean; port: number; timeout_seconds: number};
   password_configured?: boolean; active_job_id?: string
 }
-export interface Job { job_id: string; command_id: string; device_id: string; action: string; status: string; phase: string; message?: string; created_at: string; expires_at?: string; finished_at?: string; steps: {name: string; status: string; code: string; message: string}[]; observation: {state: string; observed_at?: string} }
+export interface Job { job_id: string; command_id: string; device_id: string; action: string; status: string; phase: string; code?: string; message?: string; created_at: string; expires_at?: string; finished_at?: string; steps: {name: string; status: string; code: string; message: string}[]; observation: {state: string; observed_at?: string} }
+export interface ToastItem {id:number;message:string;kind:string;key:string;duration:number}
+export interface SubmissionState {state:string;action:string;command_id:string;message?:string;uncertain?:boolean}
 
 export interface HistoryCleanup {scope: string; before: string; retention_days: number; eligible: number; active: number; protected: number; deleted: number}
 export interface Settings {schema_version: number; gateway_id: string; name: string; listen: string; public_url: string; allowed_networks: string[]; max_concurrent: number; max_vnc: number; queue_size: number; retention_days: number; max_jobs: number; device_defaults: DeviceDefaults}

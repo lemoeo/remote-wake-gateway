@@ -2,13 +2,18 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { request, setCSRF, commandKey } from './api.mjs'
 import { interfaceOptions, suggestedBroadcasts, broadcastOnSelection, broadcastWarnings } from './wol-form.mjs'
-import type { Device, Job, Settings, BatchRow, DeviceDefaults, HistoryCleanup } from './types'
+import type { Device, Job, Settings, BatchRow, DeviceDefaults, HistoryCleanup, ToastItem, SubmissionState } from './types'
 import { runBatch, batchFinished, createBatchGuard } from './batch.mjs'
 import { useBatchPanel } from './batch-panel.mjs'
 import { createRealtime } from './realtime.mjs'
 import { matchesHistoryCleanup } from './history.mjs'
 import { createDeviceEditor } from './device-editor.mjs'
 import { createDeviceSync } from './device-sync.mjs'
+import { createToasts } from './toasts.mjs'
+import { createJobNotifications, batchNotification } from './job-notifications.mjs'
+import { newestForCard } from './job-presentation.mjs'
+import ToastNotice from './ToastNotice.vue'
+import DeviceActivity from './DeviceActivity.vue'
 
 const loading = ref(true), authenticated = ref(false), initialized = ref(true), busy = ref(false)
 const password = ref(''), setupToken = ref(''), error = ref(''), notice = ref('')
@@ -32,7 +37,15 @@ const optionalOpen = ref(false)
 const deviceEditor = createDeviceEditor({request,commandKey,confirmDelete:(message:string)=>confirm(message)})
 const deviceSync = createDeviceSync({load:loadDevices})
 const savedDeviceDefaults = ref<DeviceDefaults>({broadcast:'255.255.255.255',port:9,repeat:3})
+const cardJobs = ref<Record<string,Job>>({}), submissions = ref<Record<string,SubmissionState>>({})
+const toast = ref<ToastItem|null>(null)
+const toastQueue = createToasts({onChange:(item:ToastItem|null)=>{toast.value=item}})
+const jobNotifications = createJobNotifications({notify:toastQueue.show})
+let batchCompletionNotified=false, batchNoticeKey=''
+watch(notice,text=>{if(text&&authenticated.value)toastQueue.show({key:'notice',kind:'success',message:text})},{flush:'sync'})
+watch(error,text=>{if(text&&authenticated.value&&!editing.value)toastQueue.show({key:'error',kind:'error',message:text})},{flush:'sync'})
 const chosen = ref<string[]>([]), batchRows = ref<BatchRow[]>([]), batchRunning = ref(false), batchStop = ref(false), batchMessage = ref(''), batchConfirming = ref(false)
+const manualAfterBatch = ref(new Set<string>())
 const canWake = (d: Device) => d.enabled && !d.active_job_id && (d.wake_method==='wol' || Boolean(d.password_configured))
 const selectable = computed(() => filtered.value.filter(canWake).slice(0,50))
 const allChosen = computed(() => selectable.value.length>0 && selectable.value.every(d=>chosen.value.includes(d.id)))
@@ -65,19 +78,29 @@ const methodName = (s: string) => ({wol: 'WoL 魔术包', mac_vnc: 'Mac 屏幕�
 const statusName = (s: string) => ({pending:'等待执行',running:'正在执行',success:'已完成',partial:'部分完成',failed:'失败',timeout:'超时',cancelled:'已取消',expired:'已过期',interrupted:'结果不明',submitting:'正在提交',paused:'待继续'}[s] || s)
 const phaseName = (s: string) => ({queued:'排队中',starting:'准备执行',wol:'发送 Magic Packet',vnc:'准备 VNC',connecting:'等待 Mac 连接',authenticating:'验证 Mac 账户',authenticated:'认证成功',holding:'保持连接',probe:'检测 TCP 端口',finished:'执行结束'}[s] || s)
 const date = (s: string) => new Date(s).toLocaleString('zh-CN', {hour12:false})
-const latest = (id: string) => recentJobs.value.find(j => j.device_id === id)
+const latest = (id: string) => cardJobs.value[id]
+function activityJob(d:Device){return d.active_job_id?(cardJobs.value[d.id]?.job_id===d.active_job_id?cardJobs.value[d.id]:recentJobs.value.find(j=>j.job_id===d.active_job_id)):cardJobs.value[d.id]}
+function submissionFor(d:Device):SubmissionState|undefined{
+  if(submissions.value[d.id])return submissions.value[d.id]
+  if(manualAfterBatch.value.has(d.id))return
+  const row=batchRows.value.find(r=>r.device_id===d.id&&!r.job_id)
+  if(!row||!['submitting','paused','failed'].includes(row.status))return
+  return {state:row.status==='submitting'?'submitting':row.status==='paused'?'paused':'error',action:'wake',command_id:row.command_id,message:row.message,uncertain:row.status==='paused'}
+}
 function observation(id: string) { const o = latest(id)?.observation; if(!o?.observed_at || clock.value-Date.parse(o.observed_at)>=60000) return '状态未知'; return o.state==='service_ready' ? 'VNC 已验证' : o.state==='reachable' ? '端口可达' : '状态未知' }
 function report(e: unknown) { if((e as {status?:number})?.status===401&&authenticated.value)endSession(); error.value = e instanceof Error ? e.message : '请求失败' }
 async function guarded(fn: () => Promise<void>) { if(busy.value)return; busy.value=true;error.value='';notice.value='';try{await fn()}catch(e){report(e)}finally{busy.value=false} }
-function endSession(){authenticated.value=false;sessionEpoch++;historyRequest++;realtime.stop();realtime.clear();setCSRF('');recentJobs.value=[];jobs.value=[];devices.value=[];selected.value=null;editing.value=null;chosen.value=[];batchRows.value=[];batchConfirming.value=false;historyCursor.value='';historyLoaded=false;historyDirty.value=false;cleanupPreview.value=null;historyLoading.value=false;deviceLoad=undefined;deviceDirty=false;page.value='devices';pendingKeys.clear();deviceSync.cancel();if(clockTimer)clearTimeout(clockTimer)}
+function endSession(){authenticated.value=false;toastQueue.clear();jobNotifications.clear();cardJobs.value={};submissions.value={};batchCompletionNotified=false;manualAfterBatch.value.clear();sessionEpoch++;historyRequest++;realtime.stop();realtime.clear();setCSRF('');recentJobs.value=[];jobs.value=[];devices.value=[];selected.value=null;editing.value=null;chosen.value=[];batchRows.value=[];batchConfirming.value=false;historyCursor.value='';historyLoaded=false;historyDirty.value=false;cleanupPreview.value=null;historyLoading.value=false;deviceLoad=undefined;deviceDirty=false;page.value='devices';pendingKeys.clear();deviceSync.cancel();if(clockTimer)clearTimeout(clockTimer)}
 function updateClock(){
   if(clockTimer)clearTimeout(clockTimer)
   clock.value=Date.now()
-  const expiries=recentJobs.value.map(j=>j.observation?.observed_at?Date.parse(j.observation.observed_at)+60000:0).filter(t=>t>clock.value)
+  const expiries=Object.values(cardJobs.value).map(j=>j.observation?.observed_at?Date.parse(j.observation.observed_at)+60000:0).filter(t=>t>clock.value)
   if(expiries.length)clockTimer=setTimeout(updateClock,Math.max(1,Math.min(...expiries)-clock.value))
 }
 function applyJob(job: Job){
   historyVersion++
+  if(newestForCard(job,cardJobs.value[job.device_id]))cardJobs.value[job.device_id]=job
+  jobNotifications.handle(job)
   recentJobs.value=realtime.values();updateClock()
   const d=devices.value.find(d=>d.id===job.device_id)
   if(d){if(active(job))d.active_job_id=job.job_id;else if(d.active_job_id===job.job_id)d.active_job_id=''}
@@ -89,6 +112,8 @@ function applyJob(job: Job){
   if(row){row.status=job.status;row.message=job.message||'任务正在执行'}
 }
 function missingJob(id: string){
+  jobNotifications.forget(id)
+  for(const [device,job] of Object.entries(cardJobs.value)){if(job.job_id===id)delete cardJobs.value[device]}
   historyRequest++;historyVersion++;historyLoading.value=false
   jobs.value=jobs.value.filter(j=>j.job_id!==id)
   if(selected.value?.job_id===id)selected.value=null
@@ -96,6 +121,7 @@ function missingJob(id: string){
   historyCursor.value='';if(historyLoaded)historyDirty.value=true
 }
 function historyCleared(plan: HistoryCleanup | null, ids: string[]){
+  for(const [device,job] of Object.entries(cardJobs.value)){if(matchesHistoryCleanup(job,plan)){jobNotifications.forget(job.job_id);delete cardJobs.value[device]}}
   historyRequest++;historyVersion++;historyLoading.value=false
   jobs.value=jobs.value.filter(j=>!matchesHistoryCleanup(j,plan))
   if(selected.value&&matchesHistoryCleanup(selected.value,plan))selected.value=null
@@ -131,6 +157,7 @@ async function loadDevices(target=0): Promise<void>{
       if(mark.generation!==realtime.generation){deviceDirty=true;continue}
       devices.value=realtime.overlayDevices(data.devices,mark);revision.value=data.revision
       chosen.value=chosen.value.filter(id=>devices.value.some(d=>d.id===id))
+      for(const id of Object.keys(cardJobs.value)){if(!devices.value.some(d=>d.id===id)){delete cardJobs.value[id];delete submissions.value[id]}}
     }
   })().finally(()=>{if(deviceLoad===pending)deviceLoad=undefined})
   deviceLoad=pending
@@ -167,9 +194,10 @@ function edit(d: Device){isNew.value=false;optionalOpen.value=Boolean(d.note||(d
 function chooseInterface(){if(!editing.value)return;editing.value.wol.broadcast=broadcastOnSelection(interfaces.value,editing.value.wol.interface,editing.value.wol.broadcast)}
 async function saveDevice(){await guarded(async()=>{if(!editing.value)return;const d={...editing.value, id:isNew.value?undefined:editing.value.id, vnc_password:vncPassword.value||undefined, clear_vnc_password:clearPassword.value};await deviceEditor.save(d,isNew.value);editing.value=null;vncPassword.value='';await loadDevices();notice.value='设备已保存'})}
 async function remove(d: Device){await guarded(async()=>{const deleted=await deviceEditor.remove(d,(id:string)=>{if(editing.value?.id===id)editing.value=null});if(deleted){await loadDevices();notice.value='设备已删除'}})}
-function showSubmission(job: Job, action: string, existing=false){
-  if(action==='wake')notice.value=existing?'已有相关任务正在处理，可在设备卡片查看进度和详情。':'已提交唤醒任务，可在设备卡片查看进度和结果。'
-  else selected.value=job
+function showSubmission(job: Job, d:Device, action: string, existing=false){
+  delete submissions.value[d.id]
+  jobNotifications.track(job,d,{existing})
+  if(action==='probe')selected.value=job
 }
 async function submit(d: Device,action='wake'){
   await guarded(async()=>{
@@ -177,20 +205,32 @@ async function submit(d: Device,action='wake'){
     let key=pendingKeys.get(target)
     if(!key){key=commandKey();pendingKeys.set(target,key)}
     const session=sessionEpoch
+    manualAfterBatch.value.add(d.id)
+    submissions.value[d.id]={state:'submitting',action,command_id:key}
     try{
       const job=await realtime.submit(d.id,key,action)
       if(session!==sessionEpoch)return
-      showSubmission(job,action);pendingKeys.delete(target)
+      showSubmission(job,d,action);pendingKeys.delete(target)
     }catch(e){
-      const detail=e as {jobID?:string;status?:number}
+      if(session!==sessionEpoch)return
+      const detail=e as {jobID?:string;status?:number;message?:string}
+      const known=detail.status!==401?realtime.values().find((j:Job)=>j.command_id===key&&j.device_id===d.id):undefined
+      if(known){showSubmission(known,d,action);pendingKeys.delete(target);return}
       if(detail.jobID){
-        const job=await realtime.readJob(detail.jobID)
+        let job:Job
+        try{job=await realtime.readJob(detail.jobID)}catch(readError){
+          if(session===sessionEpoch)submissions.value[d.id]={state:'error',action,command_id:key,message:'已有相关任务，但详情暂不可用，请刷新状态确认',uncertain:true}
+          throw readError
+        }
         if(session!==sessionEpoch)return
-        showSubmission(job,action,true);pendingKeys.delete(target)
-      }else{
-        if(detail.status&&detail.status<500)pendingKeys.delete(target)
-        throw e
+        pendingKeys.delete(target)
+        if(job.device_id===d.id){showSubmission(job,d,action,true);return}
+        submissions.value[d.id]={state:'error',action,command_id:key,message:'同一 Mac 目标正在执行其他设备的任务，请稍后重试'}
+        throw new Error('同一 Mac 目标已有其他任务，请稍后重试')
       }
+      submissions.value[d.id]={state:'error',action,command_id:key,message:detail.message||'请求未完成，请刷新状态确认结果',uncertain:!detail.status||detail.status>=500}
+      if(detail.status&&detail.status<500)pendingKeys.delete(target)
+      throw e
     }
   })
 }
@@ -215,6 +255,14 @@ async function continueBatch(){
       onUpdate:(row:BatchRow)=>{if(owner===sessionEpoch&&batchFinished(row.status)&&pendingKeys.get(row.device_id+':wake')===row.command_id)pendingKeys.delete(row.device_id+':wake')},
     })
     batchMessage.value=result.message||(result.paused?'批次已暂停，请继续确认已有任务结果。':'本批次已处理完成，请查看各设备结果。')
+    if(owner===sessionEpoch){
+      const finished=batchRows.value.every(r=>batchFinished(r.status))
+      if(result.paused||finished&&!batchCompletionNotified){
+        const item=batchNotification(batchRows.value,result.paused)
+        if(item)toastQueue.show({...item,key:batchNoticeKey})
+        if(finished)batchCompletionNotified=true
+      }
+    }
   }catch(e){report(e)}finally{batchRunning.value=false}
 }
 async function startBatch(){
@@ -222,11 +270,14 @@ async function startBatch(){
   const targets=devices.value.filter(d=>chosen.value.includes(d.id))
   if(!batchConfirming.value){batchConfirming.value=true;return}
   batchConfirming.value=false
+  batchCompletionNotified=false;batchNoticeKey=commandKey()
+  manualAfterBatch.value.clear()
+  for(const d of targets)delete submissions.value[d.id]
   batchRows.value=targets.map(d=>{const mapKey=d.id+':wake';const key=pendingKeys.get(mapKey)||commandKey();pendingKeys.set(mapKey,key);return {device_id:d.id,name:d.name,command_id:key,status:'pending',message:'等待提交'}})
   await continueBatch()
 }
 function batchRowStatus(row:BatchRow){return row.status==='pending'&&!row.job_id?'未提交':statusName(row.status)}
-onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()});onUnmounted(()=>{stopped=true;realtime.stop();deviceSync.cancel();if(clockTimer)clearTimeout(clockTimer);document.removeEventListener('visibilitychange',onVisibility);document.body.classList.remove('modal-open')})
+onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()});onUnmounted(()=>{stopped=true;realtime.stop();deviceSync.cancel();toastQueue.clear();jobNotifications.clear();if(clockTimer)clearTimeout(clockTimer);document.removeEventListener('visibilitychange',onVisibility);document.body.classList.remove('modal-open')})
 </script>
 
 <template>
@@ -238,7 +289,7 @@ onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()
   <div v-else class="shell">
     <aside class="sidebar"><a class="brand" href="#" @click.prevent="page='devices'"><div class="brand-mark small">R<span>↗</span></div><div>RemoteWake<small>GATEWAY</small></div></a><div class="sidebar-label">工作空间</div><nav><button :class="{chosen:page==='devices'}" @click="page='devices'">▦ <span>设备管理</span><b>{{ devices.length }}</b></button><button :class="{chosen:page==='history'}" @click="page='history'">◷ <span>唤醒记录</span></button><button :class="{chosen:page==='settings'}" @click="page='settings'">⚙ <span>系统设置</span></button></nav><div class="sidebar-bottom"><div class="gateway-status"><i></i><div>{{ gateway.name }}<small>{{ gateway.version }}</small></div></div><button class="logout" @click="logout">退出登录 ↗</button></div></aside>
     <div class="workspace"><header class="topbar"><span>家庭网络 <span class="slash">/</span> {{ page==='devices'?'设备管理':page==='history'?'唤醒记录':'系统设置' }}</span><span class="connection" :class="{degraded:realtimeStatus!=='connected'}"><i></i><span :title="connectionLabel">{{ connectionLabel }}</span><button class="text-button" :disabled="busy" @click="refreshStatus">刷新状态</button></span></header>
-      <div class="content"><div v-if="error" class="alert error" role="alert">{{ error }}<button @click="error=''">×</button></div><div v-if="notice" class="alert success" role="status">{{ notice }}<button @click="notice=''">×</button></div>
+      <div class="content">
       <template v-if="page==='devices'"><div class="page-heading"><div><span class="eyebrow">YOUR CONNECTED HOME</span><h1>设备管理<span class="count">{{ devices.length }}</span></h1><p class="muted">管理你的设备，随时发起远程唤醒。</p></div><button class="primary" @click="newDevice">＋ 添加设备</button></div>
         <div class="stats"><div><span>已管理设备</span><strong>{{ devices.length.toString().padStart(2,'0') }}</strong><small>家庭网络中的设备</small></div><div><span>正在执行</span><strong>{{ activeCount.toString().padStart(2,'0') }}<i class="stat-dot"></i></strong><small>唤醒与检测任务</small></div><div><span>唤醒方式</span><strong>03</strong><small>WoL · Mac VNC · 组合唤醒</small></div></div>
         <div class="list-toolbar"><h2>全部设备</h2><label class="search"><span>⌕</span><input v-model="search" placeholder="搜索设备名称或 IP" aria-label="搜索设备"></label></div>
@@ -261,11 +312,11 @@ onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()
           </div>
         </section>
         <div v-if="!devices.length" class="empty"><div class="empty-icon">⌘</div><h2>连接你的第一台设备</h2><p>添加 PC、Mac 或 NAS，开始使用远程唤醒。</p><button class="primary" @click="newDevice">＋ 添加设备</button></div>
-        <div v-else class="device-grid"><article v-for="d in filtered" :key="d.id" class="device-card"><div class="device-top"><label class="device-select"><input v-model="chosen" type="checkbox" :value="d.id" :aria-label="'选择 '+d.name" :disabled="batchRunning||!canWake(d)||(chosen.length>=50&&!chosen.includes(d.id))"></label><div class="device-icon" :class="d.type">{{ d.type==='mac'?'⌘':d.type==='nas'?'▤':'▣' }}</div><span class="badge" :class="d.active_job_id?'running':''">{{ d.active_job_id?'任务进行中':!d.enabled?'已禁用':observation(d.id) }}</span></div><h3>{{ d.name }}</h3><dl><div><dt>目标 IP</dt><dd>{{ d.ip||'未配置' }}</dd></div><div><dt>唤醒方式</dt><dd>{{ methodName(d.wake_method) }}</dd></div><div><dt>{{ d.wake_method==='mac_vnc'?'VNC 账户':'MAC 地址' }}</dt><dd>{{ d.wake_method==='mac_vnc'?d.vnc.username:d.wol.mac }}</dd></div></dl><div v-if="d.wake_method!=='wol'&&!d.password_configured" class="credential-hint">请先编辑设备，配置 Mac 密码</div><div class="device-actions"><button class="wake-button" :disabled="busy||batchRunning||!d.enabled||!!d.active_job_id" @click="submit(d)">{{ d.active_job_id?'◌ 执行中':'ϟ 唤醒设备' }}</button><button class="icon-button" title="TCP 检测" :disabled="busy||batchRunning||!!d.active_job_id" @click="submit(d,'probe')">⌁</button><button class="icon-button" title="编辑设备" :disabled="batchRunning||!!d.active_job_id" @click="edit(d)">✎</button></div><button v-if="d.active_job_id" class="text-button" @click="guarded(async()=>{await openJob(d.active_job_id)})">查看任务进度 →</button><div v-else-if="latest(d.id)" class="last-operation"><span :class="'status-'+latest(d.id)?.status">{{ statusName(latest(d.id)!.status) }}</span><time>{{ date(latest(d.id)!.created_at) }}</time><button class="text-button" @click="guarded(()=>openJob(latest(d.id)?.job_id))">查看详情 →</button></div></article></div>
+        <div v-else class="device-grid"><article v-for="d in filtered" :key="d.id" class="device-card"><div class="device-top"><label class="device-select"><input v-model="chosen" type="checkbox" :value="d.id" :aria-label="'选择 '+d.name" :disabled="batchRunning||!canWake(d)||(chosen.length>=50&&!chosen.includes(d.id))"></label><div class="device-icon" :class="d.type">{{ d.type==='mac'?'⌘':d.type==='nas'?'▤':'▣' }}</div><span class="badge" :class="d.active_job_id?'running':''">{{ d.active_job_id?'任务进行中':!d.enabled?'已禁用':observation(d.id) }}</span></div><h3>{{ d.name }}</h3><dl><div><dt>目标 IP</dt><dd>{{ d.ip||'未配置' }}</dd></div><div><dt>唤醒方式</dt><dd>{{ methodName(d.wake_method) }}</dd></div><div><dt>{{ d.wake_method==='mac_vnc'?'VNC 账户':'MAC 地址' }}</dt><dd>{{ d.wake_method==='mac_vnc'?d.vnc.username:d.wol.mac }}</dd></div></dl><div v-if="d.wake_method!=='wol'&&!d.password_configured" class="credential-hint">请先编辑设备，配置 Mac 密码</div><div class="device-actions"><button class="wake-button" :disabled="busy||batchRunning||!d.enabled||!!d.active_job_id" @click="submit(d)">{{ d.active_job_id?'◌ 执行中':'ϟ 唤醒设备' }}</button><button class="icon-button" title="TCP 检测" :disabled="busy||batchRunning||!!d.active_job_id" @click="submit(d,'probe')">⌁</button><button class="icon-button" title="编辑设备" :disabled="batchRunning||!!d.active_job_id" @click="edit(d)">✎</button></div><DeviceActivity :device="d" :job="activityJob(d)" :submission="submissionFor(d)" :connected="realtimeStatus==='connected'" @details="id=>guarded(()=>openJob(id))" /></article></div>
         <p class="footnote">ⓘ 唤醒包已发送或 VNC 认证成功不代表物理屏幕已亮；端口状态在检测后 60 秒内有效。</p>
       </template>
       <template v-else-if="page==='history'"><div class="page-heading"><div><span class="eyebrow">ACTIVITY</span><h1>唤醒记录</h1><p class="muted">追踪每次任务的执行步骤和结果。</p></div><button class="secondary" :disabled="busy||historyLoading" @click="guarded(()=>loadJobs())">{{ historyLoading?'正在加载…':'刷新记录' }}</button></div><p v-if="historyDirty" class="history-update" role="status">记录有变化，可点击“刷新记录”查看。</p><div class="table-wrap"><table><thead><tr><th>设备</th><th>操作</th><th>创建时间</th><th>结果</th><th></th></tr></thead><tbody><tr v-for="j in jobs" :key="j.job_id"><td>{{ devices.find(d=>d.id===j.device_id)?.name||j.device_id }}<small>{{ j.command_id }}</small></td><td>{{ j.action==='probe'?'TCP 检测':'远程唤醒' }}</td><td>{{ date(j.created_at) }}</td><td><span class="badge" :class="j.status">{{ statusName(j.status) }}</span></td><td><button class="text-button" @click="guarded(()=>openJob(j.job_id))">查看详情 →</button></td></tr><tr v-if="!jobs.length"><td colspan="5" class="muted">暂无任务记录</td></tr></tbody></table></div><button v-if="historyCursor" class="secondary load-more" :disabled="busy||historyLoading" @click="guarded(()=>loadJobs(true))">加载更多</button></template>
-      <template v-else-if="settings"><div class="page-heading"><div><span class="eyebrow">PREFERENCES</span><h1>系统设置</h1><p class="muted">管理 Gateway 配置和公开设备备份。</p></div></div><form class="settings-panel" @submit.prevent="saveSettings"><h2>Gateway 配置</h2><div class="form-grid"><label>Gateway 名称<input v-model="settings.name" required maxlength="100"></label><label>监听地址<input v-model="settings.listen" required placeholder="127.0.0.1:9000"></label><label class="wide">公开访问地址<input v-model="settings.public_url" placeholder="https://wake.example.com（可选）"><small>使用 HTTPS 反向代理时设置；变更后需重启并重新登录。</small></label><label class="wide">允许访问的目标网段<textarea v-model="networks" rows="3" required></textarea><small>每行一个 CIDR，仅允许向这些网段的设备发送请求。</small></label><label>最大并发任务<input v-model.number="settings.max_concurrent" type="number" min="1" max="16" required></label><label>最大 VNC 并发<input v-model.number="settings.max_vnc" type="number" min="1" :max="settings.max_concurrent" required></label><label>等待队列容量<input v-model.number="settings.queue_size" type="number" min="1" max="128" required></label><label>任务保留天数<input v-model.number="settings.retention_days" type="number" min="1" max="90" required><small>过期记录在启动及接受新任务前清理，修改后重启生效。</small></label><label>最大任务记录数<input v-model.number="settings.max_jobs" type="number" min="100" max="100000" required><small>保存后立即生效，不能小于现有记录数；达到上限且无过期记录可清理时暂停接受新任务。</small></label></div><fieldset class="default-settings"><legend>新设备默认参数</legend><p class="muted">仅用于之后添加的设备，保存后立即生效，不覆盖已有设备。</p><div class="form-grid"><label class="wide">默认广播地址<input v-model="settings.device_defaults.broadcast" required placeholder="255.255.255.255"></label><label>默认 UDP 端口<input v-model.number="settings.device_defaults.port" type="number" min="1" max="65535" required></label><label>默认发送次数<input v-model.number="settings.device_defaults.repeat" type="number" min="1" max="10" required></label></div></fieldset><button class="primary" :disabled="busy">保存设置</button></form><section class="settings-panel history-cleanup"><h2>手动清理任务记录</h2><p class="muted">删除对应的历史任务文件并释放存储空间。执行中、排队中及防重复执行保护期内的记录会保留；保护期至命令过期后 1 分钟结束。</p><label>清理范围<select v-model="cleanupScope" :disabled="busy" @change="cleanupPreview=null"><option value="expired">仅清理过期记录</option><option value="completed">清理全部已结束记录</option></select></label><p class="muted">过期范围按当前已生效的保留天数计算，未保存或待重启的设置不参与本次清理。</p><button class="secondary" :disabled="busy||batchRunning" @click="previewCleanup">预览清理</button><div v-if="cleanupPreview" class="cleanup-confirm" role="region" aria-label="确认清理任务记录"><strong>将永久删除 {{ cleanupPreview.eligible }} 条{{ cleanupPreview.scope==='expired'?'过期':'已结束' }}记录</strong><p>保留活动任务 {{ cleanupPreview.active }} 条、保护期内记录 {{ cleanupPreview.protected }} 条。{{ cleanupPreview.scope==='expired'?'当前保留天数为 '+cleanupPreview.retention_days+' 天。':'' }}</p><p>删除后无法恢复，并会移除对应的命令去重记录，请勿重新提交这些旧请求。设备配置、密码和认证保护不受影响。</p><div class="button-row"><button class="secondary" :disabled="busy" @click="cleanupPreview=null">取消清理</button><button class="secondary danger" :disabled="busy||!cleanupPreview.eligible" @click="confirmCleanup">确认删除 {{ cleanupPreview.eligible }} 条记录</button></div></div></section><section class="settings-panel"><h2>设备导入与导出</h2><p class="muted">仅包含公开配置，不含管理员密码或 VNC 密码。导入只新增设备，重复 ID 会被拒绝。</p><button class="secondary" @click="exportDevices">↓ 导出设备 JSON</button><label>导入 JSON<textarea v-model="importText" rows="6" placeholder="粘贴导出的设备 JSON" @input="importPreview=false"></textarea></label><div class="button-row"><button class="secondary" :disabled="busy||!importText" @click="importDevices(false)">检查导入</button><button v-if="importPreview" class="primary" :disabled="busy" @click="importDevices(true)">确认新增设备</button></div></section></template>
+      <template v-else-if="settings"><div class="page-heading"><div><span class="eyebrow">PREFERENCES</span><h1>系统设置</h1><p class="muted">管理 Gateway 配置和公开设备备份。</p></div></div><form class="settings-panel" @submit.prevent="saveSettings"><h2>Gateway 配置</h2><p v-if="error" class="alert error" role="alert">{{ error }}</p><div class="form-grid"><label>Gateway 名称<input v-model="settings.name" required maxlength="100"></label><label>监听地址<input v-model="settings.listen" required placeholder="127.0.0.1:9000"></label><label class="wide">公开访问地址<input v-model="settings.public_url" placeholder="https://wake.example.com（可选）"><small>使用 HTTPS 反向代理时设置；变更后需重启并重新登录。</small></label><label class="wide">允许访问的目标网段<textarea v-model="networks" rows="3" required></textarea><small>每行一个 CIDR，仅允许向这些网段的设备发送请求。</small></label><label>最大并发任务<input v-model.number="settings.max_concurrent" type="number" min="1" max="16" required></label><label>最大 VNC 并发<input v-model.number="settings.max_vnc" type="number" min="1" :max="settings.max_concurrent" required></label><label>等待队列容量<input v-model.number="settings.queue_size" type="number" min="1" max="128" required></label><label>任务保留天数<input v-model.number="settings.retention_days" type="number" min="1" max="90" required><small>过期记录在启动及接受新任务前清理，修改后重启生效。</small></label><label>最大任务记录数<input v-model.number="settings.max_jobs" type="number" min="100" max="100000" required><small>保存后立即生效，不能小于现有记录数；达到上限且无过期记录可清理时暂停接受新任务。</small></label></div><fieldset class="default-settings"><legend>新设备默认参数</legend><p class="muted">仅用于之后添加的设备，保存后立即生效，不覆盖已有设备。</p><div class="form-grid"><label class="wide">默认广播地址<input v-model="settings.device_defaults.broadcast" required placeholder="255.255.255.255"></label><label>默认 UDP 端口<input v-model.number="settings.device_defaults.port" type="number" min="1" max="65535" required></label><label>默认发送次数<input v-model.number="settings.device_defaults.repeat" type="number" min="1" max="10" required></label></div></fieldset><button class="primary" :disabled="busy">保存设置</button></form><section class="settings-panel history-cleanup"><h2>手动清理任务记录</h2><p class="muted">删除对应的历史任务文件并释放存储空间。执行中、排队中及防重复执行保护期内的记录会保留；保护期至命令过期后 1 分钟结束。</p><label>清理范围<select v-model="cleanupScope" :disabled="busy" @change="cleanupPreview=null"><option value="expired">仅清理过期记录</option><option value="completed">清理全部已结束记录</option></select></label><p class="muted">过期范围按当前已生效的保留天数计算，未保存或待重启的设置不参与本次清理。</p><button class="secondary" :disabled="busy||batchRunning" @click="previewCleanup">预览清理</button><div v-if="cleanupPreview" class="cleanup-confirm" role="region" aria-label="确认清理任务记录"><strong>将永久删除 {{ cleanupPreview.eligible }} 条{{ cleanupPreview.scope==='expired'?'过期':'已结束' }}记录</strong><p>保留活动任务 {{ cleanupPreview.active }} 条、保护期内记录 {{ cleanupPreview.protected }} 条。{{ cleanupPreview.scope==='expired'?'当前保留天数为 '+cleanupPreview.retention_days+' 天。':'' }}</p><p>删除后无法恢复，并会移除对应的命令去重记录，请勿重新提交这些旧请求。设备配置、密码和认证保护不受影响。</p><div class="button-row"><button class="secondary" :disabled="busy" @click="cleanupPreview=null">取消清理</button><button class="secondary danger" :disabled="busy||!cleanupPreview.eligible" @click="confirmCleanup">确认删除 {{ cleanupPreview.eligible }} 条记录</button></div></div></section><section class="settings-panel"><h2>设备导入与导出</h2><p class="muted">仅包含公开配置，不含管理员密码或 VNC 密码。导入只新增设备，重复 ID 会被拒绝。</p><button class="secondary" @click="exportDevices">↓ 导出设备 JSON</button><label>导入 JSON<textarea v-model="importText" rows="6" placeholder="粘贴导出的设备 JSON" @input="importPreview=false"></textarea></label><div class="button-row"><button class="secondary" :disabled="busy||!importText" @click="importDevices(false)">检查导入</button><button v-if="importPreview" class="primary" :disabled="busy" @click="importDevices(true)">确认新增设备</button></div></section></template>
       </div><footer>RemoteWake Gateway <span>本地管理 · 数据保存在你的 Gateway</span></footer>
     </div>
     <div v-if="editing" class="modal-backdrop device-backdrop">
@@ -338,6 +389,7 @@ onMounted(()=>{document.addEventListener('visibilitychange',onVisibility);boot()
         </form>
       </section>
     </div>
-    <div v-if="selected" class="modal-backdrop" @click.self="selected=null"><section class="modal job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title"><header><div><span class="eyebrow">WAKE ACTIVITY</span><h2 id="job-title">{{ devices.find(d=>d.id===selected?.device_id)?.name||selected.device_id }}</h2></div><button class="icon-button" aria-label="关闭" @click="selected=null">×</button></header><div class="job-summary"><span class="badge" :class="selected.status">{{ statusName(selected.status) }}</span><span>{{ phaseName(selected.phase) }}</span></div><p class="muted">{{ selected.message||'任务在后台执行，关闭页面不会取消。' }}</p><ol class="timeline"><li v-for="(step,i) in selected.steps" :key="i" :class="step.status"><span class="timeline-dot">{{ step.status==='success'?'✓':step.status==='failed'?'!':'◌' }}</span><div><strong>{{ step.name==='wol'?'发送 Magic Packet':step.name==='vnc'?'Mac 屏幕共享认证':'TCP 端口检测' }}</strong><p>{{ step.message||phaseName(selected.phase) }}</p><code v-if="step.status==='failed'">{{ step.code }}</code></div></li></ol><dl class="job-metadata"><div><dt>创建时间</dt><dd>{{ date(selected.created_at) }}</dd></div><div><dt>命令 ID</dt><dd>{{ selected.command_id }}</dd></div><div><dt>任务 ID</dt><dd>{{ selected.job_id }}</dd></div></dl><p class="hint">步骤结果不代表物理显示器状态。取消无法撤销已经发送的请求。</p><div class="modal-actions"><button v-if="active(selected)" class="secondary" :disabled="busy" @click="cancelJob">取消任务</button><span></span><button class="primary" @click="selected=null">关闭</button></div></section></div>
+    <div v-if="selected" class="modal-backdrop" @click.self="selected=null"><section class="modal job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title"><header><div><span class="eyebrow">WAKE ACTIVITY</span><h2 id="job-title">{{ devices.find(d=>d.id===selected?.device_id)?.name||selected.device_id }}</h2></div><button class="icon-button" aria-label="关闭" @click="selected=null">×</button></header><div class="job-summary"><span class="badge" :class="selected.status">{{ statusName(selected.status) }}</span><span>{{ phaseName(selected.phase) }}</span></div><p class="muted">{{ selected.message||'任务在后台执行，关闭页面不会取消。' }}</p><ol class="timeline"><li v-for="(step,i) in selected.steps" :key="i" :class="step.status"><span class="timeline-dot">{{ step.status==='success'?'✓':step.status==='failed'?'!':'◌' }}</span><div><strong>{{ step.name==='wol'?'发送 Magic Packet':step.name==='vnc'?'Mac 屏幕共享认证':'TCP 端口检测' }}</strong><p>{{ step.message||phaseName(selected.phase) }}</p><code v-if="step.status==='failed'">{{ step.code }}</code></div></li></ol><dl class="job-metadata"><div><dt>创建时间</dt><dd>{{ date(selected.created_at) }}</dd></div><div v-if="!active(selected)&&selected.finished_at&&!selected.finished_at.startsWith('0001-')"><dt>完成时间</dt><dd>{{ date(selected.finished_at) }}</dd></div><div><dt>命令 ID</dt><dd>{{ selected.command_id }}</dd></div><div><dt>任务 ID</dt><dd>{{ selected.job_id }}</dd></div></dl><p class="hint">步骤结果不代表物理显示器状态。取消无法撤销已经发送的请求。</p><div class="modal-actions"><button v-if="active(selected)" class="secondary" :disabled="busy" @click="cancelJob">取消任务</button><span></span><button class="primary" @click="selected=null">关闭</button></div></section></div>
   </div>
+  <ToastNotice v-if="authenticated" :toast="toast" @dismiss="toastQueue.dismiss" @pause="toastQueue.pause" @resume="toastQueue.resume" />
 </template>

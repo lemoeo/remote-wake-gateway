@@ -1,6 +1,6 @@
 // Match exactly the server's frozen cleanup preview. Running/queued jobs and
 // commands still inside the replay-protection window are never eligible.
-function timestamp(value) {
+export function timestamp(value) {
   const millis = Date.parse(value)
   if (!Number.isFinite(millis)) return undefined
   // Go uses nanosecond timestamps; Date.parse alone would round across the

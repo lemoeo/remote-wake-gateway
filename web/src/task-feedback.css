@@ -1,0 +1,32 @@
+.toast-viewport{position:fixed;z-index:80;top:84px;right:24px;width:min(390px,calc(100vw - 32px));pointer-events:none}
+.toast-notice{display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border:1px solid #dbe7e2;border-radius:11px;background:#fff;box-shadow:0 8px 30px #15372e20;pointer-events:auto;color:#385e50}
+.toast-notice p{margin:0;flex:1;min-width:0;font-size:12px;line-height:1.7;overflow-wrap:anywhere;max-height:180px;overflow:auto}
+.toast-notice button{border:0;background:none;color:inherit;padding:0 2px;font-size:19px;line-height:22px;flex-shrink:0}
+.toast-symbol{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#eaf2f8;color:#4c7998;font-size:13px;font-weight:700;flex-shrink:0}
+.toast-notice.success{border-color:#cce3d5}.toast-notice.success .toast-symbol{background:#e5f3e9;color:#337c50}
+.toast-notice.error{border-color:#efcfc5;color:#9a4f40}.toast-notice.error .toast-symbol{background:#fbedE8;color:#ad5948}
+.toast-notice.warning{border-color:#ead9b6;color:#8d6d2d}.toast-notice.warning .toast-symbol{background:#fcf3df;color:#96712c}
+.toast-enter-active,.toast-leave-active{transition:opacity .16s,transform .16s}.toast-enter-from,.toast-leave-to{opacity:0;transform:translateY(-8px)}
+.device-card{display:flex;flex-direction:column}
+.device-activity{height:56px;flex-shrink:0;margin-top:12px;padding:8px 10px;display:flex;align-items:center;border:1px solid #e4ebe7;border-radius:9px;background:#f7faf8;color:#768d80;container-type:inline-size}
+.activity-layout{width:100%;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:18px 16px;gap:2px 8px;align-items:center}
+.is-waiting .activity-layout{grid-template-rows:18px}.is-waiting .activity-heading{grid-column:1/-1}
+.activity-heading{grid-column:1;grid-row:1;min-width:0;display:flex;align-items:center;gap:6px}
+.activity-heading strong{min-width:0;font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650}
+.activity-symbol{display:grid;place-items:center;width:18px;height:18px;flex-shrink:0;border-radius:50%;background:#edf2ef;font-size:13px;font-weight:650;color:inherit}
+.activity-secondary{grid-column:1/-1;grid-row:2;min-width:0;line-height:16px}.has-details .activity-secondary{padding-right:40px}
+.activity-description{margin:0;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#6e8177}
+.activity-time{grid-column:2;grid-row:1;font-size:9px;line-height:18px;white-space:nowrap;color:#819589;font-variant-numeric:tabular-nums}
+.activity-details.text-button{grid-column:2;grid-row:2;justify-self:end;font-size:10px;line-height:16px;padding:0;white-space:nowrap}
+.device-activity.running{background:#f0f6fa;border-color:#d6e6ef;color:#487794}.device-activity.running .activity-symbol{background:#e2eef5}
+.device-activity.success{background:#f0f8f2;border-color:#cee5d5;color:#34784e}.device-activity.success .activity-symbol{background:#e1f0e5}
+.device-activity.error{background:#fff3ef;border-color:#efcfc3;color:#a35343}.device-activity.error .activity-symbol{background:#f8e3da}
+.device-activity.warning{background:#fff8eb;border-color:#ebdbb9;color:#95702c}.device-activity.warning .activity-symbol{background:#f5e9cd}
+.activity-symbol.is-spinning{background:none!important;border:2px solid #b8cfdc;border-top-color:#487794;animation:activity-spin .8s linear infinite;width:14px;height:14px;margin:2px}
+.activity-steps{display:flex;align-items:center;gap:6px;list-style:none;margin:0;padding:0;font-size:9px;line-height:16px;color:#9baaa2}
+.activity-steps li{display:flex;gap:3px;align-items:center;white-space:nowrap}.activity-steps .done{color:#438562}.activity-steps .active{color:#477a99;font-weight:650}.activity-steps .failed{color:#b05e4c}.activity-steps .uncertain{color:#a07b32}.activity-steps .skipped{color:#a6afa9}
+.activity-sync{color:#9a783c}
+@container(min-width:350px){.activity-layout{grid-template-columns:minmax(0,1fr) auto auto;column-gap:10px}.activity-details.text-button{grid-column:3;grid-row:1}.has-details .activity-secondary{padding-right:0}}
+@keyframes activity-spin{to{transform:rotate(360deg)}}
+@media(max-width:600px){.toast-viewport{top:128px;right:16px;left:16px;width:auto}}
+@media(prefers-reduced-motion:reduce){.toast-enter-active,.toast-leave-active{transition:none}.activity-symbol.is-spinning{animation:none;border-style:dashed}}
