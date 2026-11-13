@@ -138,6 +138,7 @@ func (s *Service) load() error {
 			s.policy.Targets[k] = g
 		}
 	}
+	s.pruneExpiredGuardsLocked(time.Now())
 	if err := s.fs.Write("runtime-policy.json", s.policy); err != nil {
 		return err
 	}
@@ -543,6 +544,11 @@ func (s *Service) Submit(ctx context.Context, cmd model.Command) (model.Job, err
 			}
 		}
 		if d.HasVNC() {
+			if s.pruneExpiredGuardsLocked(now) {
+				if e := s.write("runtime-policy.json", s.policy); e != nil {
+					return model.Job{}, e
+				}
+			}
 			if !s.creds.Has(d) {
 				return model.Job{}, model.Error(422, "credentials_required", "请为当前目标配置 VNC 密码")
 			}
