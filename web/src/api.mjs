@@ -1,4 +1,8 @@
+import { createServerClock } from './server-clock.mjs'
+
 let csrf = ''
+const serverClock = createServerClock()
+export const serverNow = () => serverClock.now()
 export function setCSRF(value) { csrf = value || '' }
 export class APIError extends Error {
   constructor(status, detail) { super(detail?.message || `请求失败 (${status})`); this.status = status; this.code = detail?.code; this.jobID = detail?.job_id }
@@ -8,7 +12,9 @@ export async function request(path, options = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 10000)
   try {
+    const started = performance.now()
     const response = await fetch('/api/v1' + path, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf, ...options.headers }, signal: controller.signal })
+    serverClock.synchronize(response.headers?.get('Date'), started)
     if (response.status === 204) return null
     const body = await response.json()
     if (!response.ok) throw new APIError(response.status, body.error)

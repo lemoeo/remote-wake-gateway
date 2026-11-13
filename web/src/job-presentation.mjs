@@ -1,6 +1,11 @@
 import { timestamp } from './history.mjs'
 
 export const jobActive = job => job && ['pending', 'running'].includes(job.status)
+export function observationLabel(observation, now) {
+  const observed = Date.parse(observation?.observed_at)
+  if (!Number.isFinite(observed) || observed <= 0 || now - observed >= 60000) return '状态未知'
+  return observation.state === 'service_ready' ? 'VNC 已验证' : observation.state === 'reachable' ? '端口可达' : '状态未知'
+}
 export function newestForCard(job, previous) {
   if(!previous || job.job_id===previous.job_id)return true
   const incoming=timestamp(job.created_at), old=timestamp(previous.created_at)

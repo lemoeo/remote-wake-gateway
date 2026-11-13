@@ -1,0 +1,52 @@
+.sidebar > .logout {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+  }
+
+  .sidebar > .brand {
+    grid-area: 1 / 1;
+    justify-self: start;
+    min-width: 0;
+    gap: 9px;
+    font-size: 16px;
+  }
+
+  .sidebar > .logout {
+    grid-area: 1 / 2;
+    align-self: center;
+    margin: 0;
+    min-height: 44px;
+    padding: 8px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .sidebar nav {
+    grid-area: 2 / 1 / auto / -1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+    margin: 0;
+    gap: 4px;
+  }
+
+  .sidebar nav button {
+    justify-content: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px 4px;
+    white-space: nowrap;
+  }
+
+  .sidebar nav button span {
+    flex: initial;
+    font-size: 12px;
+  }
+}

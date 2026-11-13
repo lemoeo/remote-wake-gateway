@@ -1,0 +1,260 @@
+:root {
+  --text-secondary: #536b60;
+  --text-muted: #64766d;
+  --font-body: 14px;
+  --font-caption: 12px;
+  --font-control: 16px;
+}
+
+/* Set control text explicitly so labels and <small> cannot shrink it. */
+#app input:not([type="checkbox"]):not([type="radio"]),
+#app select,
+#app textarea {
+  font-size: var(--font-control);
+}
+
+label,
+.form-grid label,
+.device-modal label,
+.device-modal .checkbox,
+.batch-toolbar,
+.batch-toolbar .checkbox {
+  font-size: var(--font-body);
+}
+
+label small,
+.login-card > small,
+.login-network,
+.sidebar-label,
+.sidebar nav button b,
+.badge,
+.footnote,
+footer,
+th,
+td small,
+.job-metadata > div,
+.job-metadata dd,
+.hint,
+.device-modal .hint,
+.network-warnings,
+.broadcast-suggestions,
+.credential-hint,
+.batch-summary > span,
+.batch-details > p,
+.batch-result p,
+.batch-confirm small {
+  font-size: var(--font-caption);
+}
+
+label small,
+.login-card > small,
+.sidebar-label,
+.footnote,
+footer,
+th,
+td small,
+.hint,
+.device-modal .hint,
+.broadcast-suggestions,
+.batch-result p,
+.batch-confirm small,
+.muted {
+  color: var(--text-muted);
+}
+
+label small {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.settings-panel > .form-grid label small {
+  font-size: 13px;
+}
+
+.primary,
+.secondary,
+.page-heading .primary,
+.wake-button,
+.text-button,
+.sidebar nav button span,
+.logout,
+.sidebar > .logout,
+.page-heading p,
+.settings-panel p,
+.default-settings > p,
+.empty p,
+.alert,
+.toast-notice p,
+.history-update,
+.cleanup-confirm,
+.batch-result,
+.batch-actions .text-button,
+.batch-confirm p,
+.optional-fields > summary,
+.timeline strong {
+  font-size: var(--font-body);
+}
+
+.sidebar nav button,
+.logout,
+.sidebar > .logout {
+  color: var(--text-secondary);
+}
+
+.primary,
+.secondary,
+.wake-button {
+  min-height: 44px;
+}
+
+.sidebar nav button {
+  min-height: 44px;
+}
+
+.device-actions .icon-button {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+}
+
+.device-card dl {
+  margin: 18px 0;
+}
+
+.device-card dt {
+  flex-shrink: 0;
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+}
+
+.device-card dd {
+  min-width: 0;
+  font-size: var(--font-body);
+  color: var(--text-secondary);
+}
+
+.badge {
+  color: var(--text-secondary);
+}
+
+.form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-grid > label {
+  min-width: 0;
+}
+
+.connection,
+.connection .text-button,
+.timeline p,
+.timeline code,
+.job-summary {
+  font-size: var(--font-caption);
+}
+
+.timeline p {
+  color: var(--text-muted);
+}
+
+table {
+  font-size: var(--font-body);
+}
+
+footer {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Keep the existing two-line, equal-height card feedback with larger text. */
+.device-activity {
+  padding: 6px;
+}
+
+.activity-layout {
+  grid-template-rows: 20px 18px;
+  column-gap: 4px;
+}
+
+.is-waiting .activity-layout {
+  grid-template-rows: 20px;
+}
+
+.activity-heading strong {
+  font-size: var(--font-body);
+  line-height: 20px;
+}
+
+.activity-heading {
+  gap: 4px;
+}
+
+.activity-secondary,
+.activity-steps,
+.activity-details.text-button {
+  font-size: var(--font-caption);
+  line-height: 18px;
+}
+
+.activity-time {
+  font-size: var(--font-caption);
+  line-height: 20px;
+  color: var(--text-muted);
+}
+
+.activity-description,
+.activity-steps {
+  color: var(--text-muted);
+}
+
+.has-details .activity-secondary {
+  padding-right: 50px;
+}
+
+@container (min-width: 350px) {
+  .has-details .activity-secondary {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 720px) {
+
+  .connection {
+    margin-left: auto;
+    max-width: 100%;
+  }
+
+  .connection > span {
+    max-width: 150px;
+  }
+
+  .page-heading {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .search {
+    flex: 1 1 210px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .search input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .button-row {
+    flex-wrap: wrap;
+  }
+
+  footer span {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .settings-panel > .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
