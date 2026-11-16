@@ -129,6 +129,17 @@ location = /api/v1/events {
 
 ## CLI
 
+查看总览及各命令的详细帮助：
+
+```sh
+./bin/remotewake-gateway help
+./bin/remotewake-gateway --help
+./bin/remotewake-gateway help wake
+./bin/remotewake-gateway serve --help
+```
+
+总览支持 `help`、`--help` 和 `-h`；每个命令支持 `help <命令>`、`<命令> --help` 和 `<命令> -h`。帮助显示实际构建版本、适用参数、默认值、说明及示例；只接受当前命令支持的参数。正常查看帮助返回退出码 `0`，命令或参数用法错误返回 `2`，实际执行失败返回 `1`。查看帮助不会创建数据文件、读取密码或连接 Gateway；不指定命令仍默认启动 `serve`。
+
 忘记管理员密码时，先用原运行方式停止服务，再使用本机恢复命令：
 
 ```sh

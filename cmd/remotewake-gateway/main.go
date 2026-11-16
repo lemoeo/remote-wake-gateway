@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,27 +30,18 @@ var version = "0.1.0-dev"
 func main() {
 	if e := run(os.Args[1:]); e != nil {
 		fmt.Fprintln(os.Stderr, e)
-		os.Exit(1)
+		os.Exit(exitCode(e))
 	}
 }
 func run(args []string) error {
-	command := "serve"
-	if len(args) > 0 {
-		command = args[0]
-		args = args[1:]
+	options, handled, err := parseCommand(args, os.Stdout)
+	if err != nil || handled {
+		return err
 	}
+	command := options.command
 	if command == "version" {
 		fmt.Println("RemoteWake Gateway", version)
 		return nil
-	}
-	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	dir := flags.String("data-dir", "./data", "数据目录")
-	listen := flags.String("listen", "", "HTTP 监听地址（仅本次生效）")
-	device := flags.String("device", "", "设备 ID")
-	stdin := flags.Bool("password-stdin", false, "从标准输入读取管理密码")
-	apiURL := flags.String("url", "http://127.0.0.1:9000", "正在运行的 Gateway URL")
-	if e := flags.Parse(args); e != nil {
-		return e
 	}
 	switch command {
 	case "interfaces":
@@ -61,24 +51,21 @@ func run(args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(v)
 	case "token":
-		b, e := os.ReadFile(filepath.Join(*dir, "secrets/setup.token"))
+		b, e := os.ReadFile(filepath.Join(options.dataDir, "secrets/setup.token"))
 		if e != nil {
 			return fmt.Errorf("初始化令牌不存在（管理员可能已设置），请检查服务和数据目录")
 		}
 		fmt.Print(string(b))
 		return nil
 	case "wake":
-		if !*stdin || !model.ValidID(*device) {
-			return errors.New("用法: wake --device ID --password-stdin [--url http://127.0.0.1:9000]")
-		}
 		password, e := readPassword()
 		if e != nil {
 			return e
 		}
-		return wake(*apiURL, *device, password)
+		return wake(options.apiURL, options.device, password)
 	case "check":
 		var c model.Config
-		b, e := os.ReadFile(filepath.Join(*dir, "config.json"))
+		b, e := os.ReadFile(filepath.Join(options.dataDir, "config.json"))
 		if e != nil {
 			return e
 		}
@@ -89,7 +76,7 @@ func run(args []string) error {
 			return e
 		}
 		var d model.DeviceFile
-		b, e = os.ReadFile(filepath.Join(*dir, "devices.json"))
+		b, e = os.ReadFile(filepath.Join(options.dataDir, "devices.json"))
 		if errors.Is(e, os.ErrNotExist) {
 			fmt.Println("配置有效；尚无已保存设备")
 			return nil
@@ -112,18 +99,13 @@ func run(args []string) error {
 		fmt.Println("配置和设备校验通过")
 		return nil
 	case "init", "reset-password", "serve":
-	default:
-		return errors.New("可用命令: serve、init、reset-password、token、check、interfaces、wake、version")
 	}
-	fs, e := storage.Open(*dir)
+	fs, e := storage.Open(options.dataDir)
 	if e != nil {
 		return e
 	}
 	defer fs.Close()
 	if command == "reset-password" {
-		if !*stdin {
-			return errors.New("reset-password 需要 --password-stdin；请先停止使用该数据目录的服务")
-		}
 		password, e := readPassword()
 		if e != nil {
 			return e
@@ -135,9 +117,6 @@ func run(args []string) error {
 		return nil
 	}
 	if command == "init" {
-		if !*stdin {
-			return errors.New("init 需要 --password-stdin；服务必须停止")
-		}
 		password, e := readPassword()
 		if e != nil {
 			return e
@@ -166,8 +145,8 @@ func run(args []string) error {
 		return e
 	}
 	address := service.Config().Listen
-	if *listen != "" {
-		address = *listen
+	if options.listen != "" {
+		address = options.listen
 	}
 	server := &http.Server{Addr: address, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	server.RegisterOnShutdown(service.CloseStreams)
