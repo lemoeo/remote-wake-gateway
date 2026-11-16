@@ -13,7 +13,7 @@ export function newestForCard(job, previous) {
 }
 const phases = {
   queued: '排队等待执行', starting: '正在准备唤醒', wol: '正在发送唤醒包',
-  vnc: '正在准备屏幕共享', connecting: '正在连接 Mac', authenticating: '正在验证 Mac 身份',
+  vnc: '正在准备屏幕共享', connecting: '正在连接 Mac', waiting_network: '等待 Mac 网络恢复', authenticating: '正在验证 Mac 身份',
   authenticated: 'VNC 认证成功', holding: 'VNC 认证成功，正在保持连接', probe: '正在等待目标端口响应',
 }
 
@@ -39,7 +39,7 @@ export function presentJob(job, device, submission) {
   const markers = []
   if (hasWol) markers.push({name:'wol',label:'发送',state:stepState(wol)})
   if (hasVNC) {
-    markers.push({name:'connect',label:'连接',state:connected?'done':running&&['vnc','connecting'].includes(job.phase)?'active':vnc?.status==='failed'?'failed':pending})
+    markers.push({name:'connect',label:'连接',state:connected?'done':running&&['vnc','connecting','waiting_network'].includes(job.phase)?'active':vnc?.status==='failed'?'failed':pending})
     markers.push({name:'auth',label:'认证',state:authenticated?'done':vnc?.code==='auth_result_unknown'?'uncertain':running&&job.phase==='authenticating'?'active':vnc?.status==='failed'&&connected?'failed':pending})
   }
   if (hasProbe) markers.push({name:'probe',label:'检测',state:stepState(probe)})

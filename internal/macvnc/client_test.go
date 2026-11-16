@@ -111,7 +111,7 @@ func TestAppleDHWireAuthentication(t *testing.T) {
 					return errors.New("disk full")
 				}
 				return nil
-			}})
+			}, RetryConnect: true})
 			if tc.want != "" && Code(e) != tc.want {
 				t.Fatalf("want %s, got %v", tc.want, e)
 			}

@@ -43,19 +43,8 @@ func TestCombinedWakeKeepsBothStepResults(t *testing.T) {
 			s, _ := testService(t)
 			d := addMac(t, s, "combined")
 			d.WakeMethod = "wol_mac_vnc"
-			interfaces, e := wol.Interfaces()
-			if e != nil {
-				t.Fatal(e)
-			}
-			for _, i := range interfaces {
-				if i.IP == "127.0.0.1" {
-					d.WoL = model.WoL{MAC: "02:11:22:33:44:55", Interface: i.Name, Broadcast: i.Broadcast, Port: 9, Repeat: 1, IntervalMS: 100}
-				}
-			}
-			if d.WoL.Interface == "" {
-				t.Skip("no IPv4 loopback")
-			}
-			if _, e = s.SaveDevice(d, nil, false, false); e != nil {
+			d.WoL = model.WoL{MAC: "02:11:22:33:44:55", Broadcast: "255.255.255.255", Port: 9, Repeat: 1, IntervalMS: 100}
+			if _, e := s.SaveDevice(d, nil, false, false); e != nil {
 				t.Fatal(e)
 			}
 			var sends atomic.Int32
@@ -67,6 +56,9 @@ func TestCombinedWakeKeepsBothStepResults(t *testing.T) {
 				return nil
 			}
 			s.VNC = func(ctx context.Context, o macvnc.Options) (macvnc.Evidence, error) {
+				if !o.RetryConnect {
+					t.Error("combined wake did not enable TCP retries")
+				}
 				if sends.Load() != 1 {
 					t.Error("VNC executed before WoL")
 				}

@@ -23,6 +23,12 @@ type Failure struct{ Code string }
 func (f *Failure) Error() string { return f.Code }
 func fail(code string) error     { return &Failure{Code: code} }
 
+// ConnectError preserves the TCP error separately from protocol and auth errors.
+type ConnectError struct{ Err error }
+
+func (e *ConnectError) Error() string { return Message(Code(e)) + ": " + e.Err.Error() }
+func (e *ConnectError) Unwrap() error { return e.Err }
+
 type Evidence struct {
 	Connected     bool
 	AuthSent      bool
@@ -35,11 +41,20 @@ type Options struct {
 	Password     []byte
 	Hold         time.Duration
 	AuthDeadline time.Time
+	RetryConnect bool
 	BeforeAuth   func() error
 	Progress     func(string)
 }
 
 func Run(ctx context.Context, o Options) (ev Evidence, err error) {
+	var dialer net.Dialer
+	if o.RetryConnect {
+		dialer.Timeout = 3 * time.Second
+	}
+	return run(ctx, o, dialer.DialContext)
+}
+
+func run(ctx context.Context, o Options, dial func(context.Context, string, string) (net.Conn, error)) (ev Evidence, err error) {
 	if !model.CredentialText(o.Username) || !model.CredentialText(string(o.Password)) {
 		return ev, fail("invalid_credentials")
 	}
@@ -51,16 +66,37 @@ func Run(ctx context.Context, o Options) (ev Evidence, err error) {
 	authCtx, cancel := context.WithDeadline(ctx, o.AuthDeadline)
 	defer cancel()
 	var c net.Conn
-	report("connecting")
+	var lastConnectErr *ConnectError
 	for {
-		c, err = (&net.Dialer{Timeout: 3 * time.Second}).DialContext(authCtx, "tcp", net.JoinHostPort(o.IP, strconv.Itoa(o.Port)))
+		if contextErr := authCtx.Err(); contextErr != nil {
+			if lastConnectErr != nil && !errors.Is(contextErr, context.Canceled) {
+				return ev, lastConnectErr
+			}
+			return ev, contextErr
+		}
+		report("connecting")
+		c, err = dial(authCtx, "tcp", net.JoinHostPort(o.IP, strconv.Itoa(o.Port)))
 		if err == nil {
 			break
 		}
+		if errors.Is(authCtx.Err(), context.Canceled) {
+			return ev, authCtx.Err()
+		}
+		connectErr := &ConnectError{Err: err}
+		lastConnectErr = connectErr
+		if !o.RetryConnect || authCtx.Err() != nil || time.Until(o.AuthDeadline) <= time.Second {
+			return ev, connectErr
+		}
+		report("waiting_network")
+		timer := time.NewTimer(time.Second)
 		select {
 		case <-authCtx.Done():
-			return ev, authCtx.Err()
-		case <-time.After(time.Second):
+			timer.Stop()
+			if errors.Is(authCtx.Err(), context.Canceled) {
+				return ev, authCtx.Err()
+			}
+			return ev, connectErr
+		case <-timer.C:
 		}
 	}
 	ev.Connected = true
@@ -262,6 +298,20 @@ func write(w io.Writer, b []byte) error {
 	return nil
 }
 func Code(e error) string {
+	var connectErr *ConnectError
+	if errors.As(e, &connectErr) {
+		if errors.Is(e, context.Canceled) {
+			return "cancelled"
+		}
+		if code := connectionErrorCode(e); code != "" {
+			return code
+		}
+		var networkError net.Error
+		if errors.Is(e, context.DeadlineExceeded) || errors.As(e, &networkError) && networkError.Timeout() {
+			return "connection_timeout"
+		}
+		return "connection_failed"
+	}
 	var f *Failure
 	if errors.As(e, &f) {
 		return f.Code
@@ -276,6 +326,14 @@ func Code(e error) string {
 }
 func Message(code string) string {
 	switch code {
+	case "connection_refused":
+		return "TCP 连接被拒绝，请检查 Mac 是否开启屏幕共享"
+	case "network_unreachable":
+		return "网络不可达，请检查 Mac 地址和网络连接"
+	case "connection_timeout":
+		return "TCP 连接超时，Mac 可能离线或网络未响应"
+	case "connection_failed":
+		return "TCP 连接失败，请检查 Mac 地址、端口和网络"
 	case "auth_rejected":
 		return "Mac 拒绝了凭据，请检查账户和屏幕共享权限"
 	case "auth_limited":

@@ -35,6 +35,26 @@ test('combined wake keeps failed WoL visible while VNC is still connecting',()=>
   assert.equal(partial.tone,'warning');assert.match(partial.detail,/VNC 认证完成/)
   assert.equal(partial.steps.find(s=>s.name==='finish').state,'uncertain')
 })
+test('combined TCP retries show network recovery while keeping the connection step active',()=>{
+  const combined={...mac,wake_method:'wol_mac_vnc'}
+  const view=presentJob(job({phase:'waiting_network',steps:[{name:'wol',status:'success'},{name:'vnc',status:'running'}]}),combined)
+  assert.equal(view.title,'等待 Mac 网络恢复')
+  assert.equal(view.active,true)
+  assert.equal(view.steps.find(s=>s.name==='wol').state,'done')
+  assert.equal(view.steps.find(s=>s.name==='connect').state,'active')
+  assert.equal(view.steps.find(s=>s.name==='auth').state,'pending')
+})
+test('TCP failures retain their connection diagnosis instead of a generic task timeout',()=>{
+  const step={name:'vnc',status:'failed',code:'connection_timeout',message:'TCP 连接超时，Mac 可能离线或网络未响应: dial tcp: i/o timeout'}
+  const single=presentJob(job({status:'failed',code:step.code,phase:'finished',steps:[step]}),mac)
+  assert.equal(single.title,'唤醒失败')
+  assert.equal(single.detail,step.message)
+  assert.equal(single.steps.find(s=>s.name==='connect').state,'failed')
+  assert.equal(single.steps.find(s=>s.name==='auth').state,'skipped')
+  const combined=presentJob(job({status:'partial',phase:'finished',steps:[{name:'wol',status:'success'},step]}),{...mac,wake_method:'wol_mac_vnc'})
+  assert.equal(combined.title,'部分步骤已完成')
+  assert.match(combined.detail,/唤醒包已发送；TCP 连接超时/)
+})
 test('failures retain concrete reasons and distinguish timeout, cancellation and uncertain authentication',()=>{
   const failed=presentJob(job({status:'failed',phase:'finished',steps:[{name:'vnc',status:'failed',code:'auth_rejected',message:'Mac 拒绝了凭据，请检查账户'}]}),mac)
   assert.equal(failed.tone,'error');assert.match(failed.detail,/拒绝了凭据/)

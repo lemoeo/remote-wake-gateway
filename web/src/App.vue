@@ -87,7 +87,7 @@ const compactConnectionLabel = computed(() => ({connecting:'连接中',syncing:'
 const connectionInfo = computed(() => ({label:connectionLabel.value,text:compactConnectionLabel.value,degraded:realtimeStatus.value!=='connected',refreshing:refreshing.value,busy:busy.value}))
 const methodName = (s: string) => ({wol: 'WoL 魔术包', mac_vnc: 'Mac 屏幕共享', wol_mac_vnc: 'WoL + Mac VNC'}[s] || s)
 const statusName = (s: string) => ({pending:'等待执行',running:'正在执行',success:'已完成',partial:'部分完成',failed:'失败',timeout:'超时',cancelled:'已取消',expired:'已过期',interrupted:'结果不明',submitting:'正在提交',paused:'待继续'}[s] || s)
-const phaseName = (s: string) => ({queued:'排队中',starting:'准备执行',wol:'发送 Magic Packet',vnc:'准备 VNC',connecting:'等待 Mac 连接',authenticating:'验证 Mac 账户',authenticated:'认证成功',holding:'保持连接',probe:'检测 TCP 端口',finished:'执行结束'}[s] || s)
+const phaseName = (s: string) => ({queued:'排队中',starting:'准备执行',wol:'发送 Magic Packet',vnc:'准备 VNC',connecting:'等待 Mac 连接',waiting_network:'等待 Mac 网络恢复',authenticating:'验证 Mac 账户',authenticated:'认证成功',holding:'保持连接',probe:'检测 TCP 端口',finished:'执行结束'}[s] || s)
 const date = (s: string) => new Date(s).toLocaleString('zh-CN', {hour12:false})
 const latest = (id: string) => cardJobs.value[id]
 function activityJob(d:Device){return d.active_job_id?(cardJobs.value[d.id]?.job_id===d.active_job_id?cardJobs.value[d.id]:recentJobs.value.find(j=>j.job_id===d.active_job_id)):cardJobs.value[d.id]}

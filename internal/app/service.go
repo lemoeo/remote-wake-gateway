@@ -712,6 +712,7 @@ func (s *Service) run(t task) {
 	authDeadline := time.Now().Add(30 * time.Second)
 	success, failed := 0, 0
 	timedOut := false
+	var connectionFailure *macvnc.ConnectError
 	execute := func(name string, fn func() error) error {
 		s.stepStart(t.id, name)
 		if e := ctx.Err(); e != nil {
@@ -721,7 +722,10 @@ func (s *Service) run(t task) {
 			return model.Error(503, "storage_unavailable", "存储不可用")
 		}
 		e := fn()
-		if errors.Is(e, context.DeadlineExceeded) {
+		var connectErr *macvnc.ConnectError
+		if name == "vnc" && errors.As(e, &connectErr) {
+			connectionFailure = connectErr
+		} else if errors.Is(e, context.DeadlineExceeded) {
 			timedOut = true
 		}
 		s.stepEnd(t.id, name, e)
@@ -780,8 +784,15 @@ func (s *Service) run(t task) {
 			status = "partial"
 			message = "部分步骤完成，请查看步骤结果"
 		}
+		if connectionFailure != nil {
+			code = macvnc.Code(connectionFailure)
+			message = connectionFailure.Error()
+			if success > 0 {
+				message = "唤醒包已发送；" + message
+			}
+		}
 	}
-	if e := ctx.Err(); e != nil || timedOut {
+	if e := ctx.Err(); timedOut || e != nil && connectionFailure == nil || errors.Is(e, context.Canceled) {
 		status = "timeout"
 		code = "timeout"
 		message = "执行超时，已完成的步骤仍然有效"
@@ -801,7 +812,7 @@ func (s *Service) runVNC(ctx context.Context, t task, deadline time.Time) error 
 		return e
 	}
 	defer clear(password)
-	ev, e := s.VNC(ctx, macvnc.Options{IP: t.device.IP, Port: t.device.VNC.Port, Username: t.device.VNC.Username, Password: password, Hold: time.Duration(t.device.VNC.HoldSeconds) * time.Second, AuthDeadline: deadline, Progress: func(p string) { s.phase(t.id, p) }, BeforeAuth: func() error {
+	ev, e := s.VNC(ctx, macvnc.Options{IP: t.device.IP, Port: t.device.VNC.Port, Username: t.device.VNC.Username, Password: password, Hold: time.Duration(t.device.VNC.HoldSeconds) * time.Second, AuthDeadline: deadline, RetryConnect: t.device.WakeMethod == "wol_mac_vnc", Progress: func(p string) { s.phase(t.id, p) }, BeforeAuth: func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if e := s.writable(); e != nil {
@@ -878,6 +889,11 @@ func (s *Service) stepEnd(id, name string, e error) {
 		if name == "vnc" {
 			step.Code = macvnc.Code(e)
 			step.Message = macvnc.Message(step.Code)
+			var connectErr *macvnc.ConnectError
+			if errors.As(e, &connectErr) {
+				step.Message = connectErr.Error()
+				return
+			}
 		}
 		if errors.Is(e, context.DeadlineExceeded) {
 			step.Code = "timeout"
