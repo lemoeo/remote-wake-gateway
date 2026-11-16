@@ -22,7 +22,7 @@ func Interfaces() ([]Interface, error) {
 	}
 	out := []Interface{}
 	for _, i := range list {
-		if i.Flags&net.FlagUp == 0 {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 		addrs, e := i.Addrs()

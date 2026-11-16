@@ -14,9 +14,8 @@ export function suggestedBroadcasts(networks, name) {
 }
 
 export function broadcastOnSelection(networks, name, current) {
-  if (!name || current === '255.255.255.255') return current
-  const suggestions = suggestedBroadcasts(networks, name)
-  return suggestions.includes(current) ? current : suggestions[0] || current
+  if (!name) return current
+  return suggestedBroadcasts(networks, name)[0] || current
 }
 
 function validIPv4(value) {

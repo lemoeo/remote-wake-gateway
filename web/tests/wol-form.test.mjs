@@ -13,11 +13,22 @@ test('one NIC remains one option when it has multiple IPv4 addresses', () => {
     {name:'br-lan',label:'br-lan · 10.0.0.1'},
   ])
 })
-test('selecting a NIC suggests its broadcast while preserving limited broadcast and valid aliases', () => {
+test('selecting a NIC fills its first broadcast even when the current address is limited or custom', () => {
   assert.equal(broadcastOnSelection(networks,'eth0',''), '192.168.1.255')
-  assert.equal(broadcastOnSelection(networks,'eth0','192.168.2.255'), '192.168.2.255')
-  assert.equal(broadcastOnSelection(networks,'eth0','255.255.255.255'), '255.255.255.255')
+  assert.equal(broadcastOnSelection(networks,'eth0','192.168.2.255'), '192.168.1.255')
+  assert.equal(broadcastOnSelection(networks,'eth0','255.255.255.255'), '192.168.1.255')
+  assert.equal(broadcastOnSelection(networks,'eth0','172.16.1.255'), '192.168.1.255')
+})
+test('switching NICs replaces the previous broadcast with the selected NIC broadcast', () => {
+  const current = broadcastOnSelection(networks,'eth0','255.255.255.255')
+  assert.equal(broadcastOnSelection(networks,'br-lan',current), '10.0.0.255')
+  assert.equal(broadcastOnSelection(networks,'eth0','10.0.0.255'), '192.168.1.255')
+})
+test('system selection or an unavailable NIC preserves the current broadcast', () => {
   assert.equal(broadcastOnSelection(networks,'','192.168.2.255'), '192.168.2.255')
+  assert.equal(broadcastOnSelection(networks,'','255.255.255.255'), '255.255.255.255')
+  assert.equal(broadcastOnSelection(networks,'missing','192.168.2.255'), '192.168.2.255')
+  assert.equal(broadcastOnSelection([],'eth0','255.255.255.255'), '255.255.255.255')
 })
 test('custom broadcast gets an advisory without replacing the user input', () => {
   assert.match(broadcastWarnings(networks,'eth0','10.0.0.255')[0], /仍可保存/)

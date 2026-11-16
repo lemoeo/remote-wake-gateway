@@ -22,36 +22,14 @@ func TestMagicPacketAndLoopbackDelivery(t *testing.T) {
 			t.Fatal("invalid repeated MAC")
 		}
 	}
-	list, e := Interfaces()
-	if e != nil {
-		t.Fatal(e)
-	}
-	var iface Interface
-	for _, i := range list {
-		if i.IP == "127.0.0.1" {
-			iface = i
-		}
-	}
-	if iface.Name == "" {
-		t.Skip("no loopback IPv4")
-	}
-	conn, e := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
+	conn, e := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(time.Second))
-	w := model.WoL{MAC: "02:11:22:33:44:55", Broadcast: iface.Broadcast, Interface: iface.Name, Port: conn.LocalAddr().(*net.UDPAddr).Port, Repeat: 1, IntervalMS: 100}
-	source, e := Source(w)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if !source.Equal(net.IPv4(127, 0, 0, 1)) {
-		t.Fatalf("wrong manual source: %v", source)
-	}
 	// Use loopback unicast so this test never sends a wake packet to a real LAN.
-	// An explicitly chosen NIC must also allow a custom destination.
-	w.Broadcast = "127.0.0.1"
+	w := model.WoL{MAC: "02:11:22:33:44:55", Broadcast: "127.0.0.1", Port: conn.LocalAddr().(*net.UDPAddr).Port, Repeat: 1, IntervalMS: 100}
 	if e = Send(context.Background(), w); e != nil {
 		t.Fatal(e)
 	}
@@ -63,13 +41,32 @@ func TestMagicPacketAndLoopbackDelivery(t *testing.T) {
 	if !bytes.Equal(buf[:n], p) {
 		t.Fatal("received wrong packet")
 	}
-	w.Interface = ""
-	if e = Send(context.Background(), w); e != nil {
-		t.Fatal(e)
+}
+
+func TestInterfacesExcludeLoopback(t *testing.T) {
+	list, err := Interfaces()
+	if err != nil {
+		t.Fatal(err)
 	}
-	n, _, e = conn.ReadFromUDP(buf)
-	if e != nil || !bytes.Equal(buf[:n], p) {
-		t.Fatalf("OS-selected source failed: %v", e)
+	for _, address := range list {
+		iface, err := net.InterfaceByName(address.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			t.Fatalf("unavailable or loopback interface listed: %+v", address)
+		}
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			if _, err := Source(model.WoL{Interface: iface.Name, Broadcast: "127.0.0.1"}); err == nil {
+				t.Fatalf("loopback interface accepted as manual source: %s", iface.Name)
+			}
+		}
 	}
 }
 

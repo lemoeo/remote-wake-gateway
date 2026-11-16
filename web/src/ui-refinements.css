@@ -89,7 +89,7 @@
   }
 }
 
-@container device-list (min-width: 1000px) {
+@container device-list (min-width: 960px) {
   .device-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -315,6 +315,31 @@
 
 @media (max-width: 720px) {
 
+  footer {
+    gap: 12px;
+    align-items: baseline;
+  }
+
+  .footer-brand {
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .footer-brand .footer-version {
+    overflow-wrap: normal;
+  }
+
+  .footer-product-suffix,
+  .footer-note-detail {
+    display: none;
+  }
+
+  .footer-note {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
   .sidebar > .logout {
     width: auto;
     gap: 6px;
@@ -325,6 +350,12 @@
     width: 44px;
     height: 44px;
     padding: 12px;
+  }
+}
+
+@media (max-width: 360px) {
+  .footer-note {
+    display: none;
   }
 }
 
